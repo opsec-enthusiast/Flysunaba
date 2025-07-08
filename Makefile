@@ -6,7 +6,7 @@ MAN =		man
 BINDIR =	${PREFIX}/${BIN}
 MANDIR =	${PREFIX}/${MAN}/man${SECTION}
 XSUNABA_USER ?= xsunaba
-DOAS_LINE =	"permit nopass ${USER} as ${XSUNABA_USER}"
+DOAS_LINE =	permit nopass ${USER} as ${XSUNABA_USER}
 
 build:
 	@echo "Nothing to be built."
@@ -21,8 +21,8 @@ install-user:
 	id ${XSUNABA_USER} || useradd -m ${XSUNABA_USER}
 
 install-doas:
-	! test -f /etc/doas.conf \
-		&& touch /etc/doas.conf \
+	test -f /etc/doas.conf \
+		|| touch /etc/doas.conf \
 		&& chown root:wheel /etc/doas.conf \
 		&& chmod 600 /etc/doas.conf
 	grep -q "${DOAS_LINE}" /etc/doas.conf \
