@@ -75,7 +75,6 @@ You can then execute `Xsunaba` with your custom sandbox user, for example (repla
 ```
 XSUNABA_USER=<sandbox_user> Xsunaba firefox --private-window &
 ```
-```
 
 #### Shared Files
 
