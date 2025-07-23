@@ -31,9 +31,7 @@ install-doas:
 install-sndio-cookie:
 	@echo "Copying sndio cookie from '${USER}' to '${XSUNABA_USER}'..."
 	mkdir -p ~${XSUNABA_USER}/.sndio
-	cp ~${USER}/.sndio/cookie ~${XSUNABA_USER}/.sndio/
-	chown ${XSUNABA_USER}:${XSUNABA_USER} ~${XSUNABA_USER}/.sndio/cookie
-	chmod 600 ~${XSUNABA_USER}/.sndio/cookie
+	install -o ${XSUNABA_USER} -g ${XSUNABA_USER} -m 600 ~${USER}/.sndio/cookie ~${XSUNABA_USER}/.sndio/
 
 uninstall: uninstall-doas uninstall-user
 	rm ${BINDIR}/${PROG}

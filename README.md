@@ -89,9 +89,7 @@ By default, X11 applications executed in the Xsunaba sandbox will not have acces
 
 ```
 doas -u xsunaba mkdir -p ~xsunaba/.sndio
-doas cp $HOME/.sndio/cookie ~xsunaba/.sndio/
-doas chown xsunaba:xsunaba ~xsunaba/.sndio/cookie
-doas chmod 600 ~xsunaba/.sndio/cookie
+doas install -o xsunaba -g xsunaba -m 600 ~${USER}/.sndio/cookie ~xsunaba/.sndio/
 ```
 
 The Makefile also provides an `install-sndio-cookie` target to automate this:
@@ -101,6 +99,13 @@ doas make install-sndio-cookie USER=$USER
 ```
 
 *IMPORTANT:* If you have enabled audio recording in the OpenBSD kernel using [sysctl(8)](https://man.openbsd.org/sysctl) or [sysctl.conf(5)](https://man.openbsd.org/sysctl.conf) (`kern.audio.record=1`), applications run in the sandbox will be able to access your microphone.
+
+If audio is failing to play from applications within the Xsunaba sandbox, first confirm the following:
+
+1. You have played _any_ audio as your primary user, which will have created the sndio(7) cookie
+2. You have copied, _not_ symlinked, your user's `~/.sndio/cookie` to the Xsunaba user
+3. The Xsunaba user's `~/.sndio/cookie` is owned by the correct user (e.g. `xsunaba:xsunaba`) and _only_ the owner has read & write permissions (i.e. `600`)
+4. That there contents of your user's and the Xsunaba user's `~/.sndio/cookie` files are identical
 
 ## LICENSE
 
