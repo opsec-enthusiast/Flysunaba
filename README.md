@@ -29,6 +29,7 @@ Limitations due to implementation via `Xephyr`:
 
 ### Optional
 
+* [xclip(1)](https://github.com/astrand/xclip)
 * [sndio(7)](https://man.openbsd.org/sndio)
 
 ## INSTALLATION
@@ -81,6 +82,22 @@ You can then execute `Xsunaba` with your custom sandbox user, for example (repla
 
 ```
 XSUNABA_USER=<sandbox_user> Xsunaba firefox --private-window &
+```
+
+#### Shared Selection and/or Clipboard
+
+If you want to copy the sandbox user's X selection and/or clipboard to your user's selection and/or clipboard, this can be done with `xclip`. After starting an application in your `Xsunaba` sandbox, do the following:
+
+##### Selection
+
+```
+doas -u "$XSUNABA_USER" xclip -display "$XSUNABA_DISPLAY" -out | xclip -in
+```
+
+##### Clipboard
+
+```
+doas -u "$XSUNABA_USER" xclip -display "$XSUNABA_DISPLAY" -selection clipboard -out | xclip -selection clipboard -in
 ```
 
 #### Shared Files
