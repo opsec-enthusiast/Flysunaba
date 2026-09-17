@@ -1,0 +1,364 @@
+#!/bin/ksh
+
+#
+# Flysunaba - execute X applications in a sandboxed X display
+#
+# The command is Fsunaba. This is the Flysunaba fork of Xsunaba, which is
+# originally based on
+# http://blog.sleeplessbeastie.eu/2013/07/19/how-to-create-browser-sandbox/
+#
+# MIT License
+#
+# Copyright (c) 2020 Morgan Aldridge
+# Copyright (c) 2013 Milosz Galazka
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+
+_tool="${0##*/}"
+
+# show verbose output
+VERBOSE="${VERBOSE:-false}"
+
+# host X display to render the sandbox display into
+FSUNABA_HOST_DISPLAY="${FSUNABA_HOST_DISPLAY:-${DISPLAY:-}}"
+
+# sandbox user
+FSUNABA_USER="${FSUNABA_USER:-fsunaba}"
+
+# amnesic sandbox user, whose home directory is erased around each session
+FSUNABA_AMNESIC_USER="${FSUNABA_AMNESIC_USER:-${FSUNABA_USER}-amnesic}"
+
+# sandbox display size in pixels: remember whether the caller chose a size, so
+# that application-specific defaults apply only when nothing was requested
+_SIZE_SET=no
+[[ -n "${WIDTH:-}" || -n "${HEIGHT:-}" ]] && _SIZE_SET=yes
+WIDTH="${WIDTH:-1024}"
+HEIGHT="${HEIGHT:-768}"
+
+# seconds to wait for Xephyr to become ready
+FSUNABA_TIMEOUT="${FSUNABA_TIMEOUT:-10}"
+
+# additional options passed to Xephyr
+FSUNABA_XEPHYR_OPTS="${FSUNABA_XEPHYR_OPTS:-}"
+
+# window manager to run inside the sandbox when the -w option is used
+FSUNABA_WM="${FSUNABA_WM:-cwm}"
+
+# private runtime state
+_XEPHYR_PID=""
+_XEPHYR_LOG=""
+_TMPDIR=""
+_XAUTH=""
+_DISPLAY_FILE=""
+_DISPLAY=""
+_SANDBOX_HOME=""
+_HOST_AUTH=no
+_SANDBOX_AUTH=no
+_AMNESIC=no
+_WM=""
+
+# print an error to stderr and exit
+_fatal() {
+  print -u2 -r -- "${_tool}: $1! Exiting."
+  exit "${2:-1}"
+}
+
+# print basic help
+_usage() {
+  cat <<EOF
+Usage: ${_tool} [-hvrGAw] [-d display] [-s widthxheight] [-u user] command [argument ...]
+
+Run command in a sandboxed X display as a separate user.
+
+Options:
+  -A           run as the amnesic user and erase its home directory
+  -d display   host X display to render the sandbox into (default: \$DISPLAY)
+  -G           do not let the sandbox grab the keyboard and mouse
+  -h           show this help and exit
+  -r           make the sandbox window resizeable
+  -s WxH       sandbox display size in pixels (default: 1024x768)
+  -u user      sandbox user to run command as (default: fsunaba)
+  -v           show verbose output
+  -w           run a window manager in the sandbox (default: cwm)
+EOF
+}
+
+# fail unless a value is a positive integer
+_require_positive_int() {
+  case "$2" in '' | *[!0-9]*) _fatal "invalid $1 '$2'" 2 ;; esac
+  [[ "$2" -gt 0 ]] || _fatal "invalid $1 '$2'" 2
+}
+
+# refuse to erase anything that is not a dedicated, non-privileged home
+_amnesic_guard() {
+  [[ "$(id -u)" -ne 0 ]] \
+    || _fatal "refusing to run amnesic mode as root"
+  [[ "$FSUNABA_USER" != "$(id -un)" ]] \
+    || _fatal "refusing to erase the invoking user's home directory"
+  [[ "$FSUNABA_USER" != root ]] \
+    || _fatal "refusing to erase root's home directory"
+  case "$_SANDBOX_HOME" in
+    /home/*) ;;
+    *) _fatal "amnesic home '${_SANDBOX_HOME}' is not under /home" ;;
+  esac
+  if id -Gn "$FSUNABA_USER" | grep -qwE 'wheel|operator'; then
+    _fatal "amnesic user '${FSUNABA_USER}' is in a privileged group"
+  fi
+  return 0
+}
+
+# print Xephyr's diagnostics, which are shown only when it fails to start
+_show_xephyr_log() {
+  [[ -s "$_XEPHYR_LOG" ]] || return 0
+  print -u2 -r -- "${_tool}: Xephyr reported:"
+  cat "$_XEPHYR_LOG" >&2
+}
+
+# erase every entry inside the sandbox home directory, then report leftovers
+#
+# Runs in the home directory first, because a process that cannot read its
+# working directory makes find fall back to full paths, which is both slow and
+# refused by some of its primaries. Uses rm through find rather than
+# find -delete, which aborts the whole walk on OpenBSD when it sees such paths.
+_wipe_home() {
+  local flag="${1:-}"
+  local output=""
+  [[ -n "$_SANDBOX_HOME" && -d "$_SANDBOX_HOME" ]] || return 0
+  output="$(doas $flag -u "$FSUNABA_USER" /bin/sh -c '
+      cd "$1" || exit 1
+      chmod -R u+rwX "$1" 2>/dev/null
+      find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>&1
+      ls -A "$1" 2>/dev/null | head -1
+    ' _ "$_SANDBOX_HOME" 2>&1)" || {
+    print -u2 -r -- "${_tool}: could not erase '${_SANDBOX_HOME}'"
+    [[ -n "$output" ]] && print -u2 -r -- "$output"
+    return 1
+  }
+  if [[ -n "$output" ]]; then
+    print -u2 -r -- "${_tool}: '${_SANDBOX_HOME}' is not empty after erasing:"
+    print -u2 -r -- "$output"
+    return 1
+  fi
+  return 0
+}
+
+# stop Xephyr, remove authentication cookies, and delete private state
+_cleanup() {
+  if [[ -n "$_XEPHYR_PID" ]]; then
+    kill "$_XEPHYR_PID" 2>/dev/null
+    wait "$_XEPHYR_PID" 2>/dev/null
+    _XEPHYR_PID=""
+  fi
+  if [[ "$_HOST_AUTH" == yes ]]; then
+    xauth -f "$_XAUTH" remove "$_DISPLAY" 2>/dev/null
+    _HOST_AUTH=no
+  fi
+  if [[ "$_SANDBOX_AUTH" == yes ]]; then
+    doas -n -u "$FSUNABA_USER" env HOME="$_SANDBOX_HOME" \
+      xauth remove "$_DISPLAY" 2>/dev/null
+    _SANDBOX_AUTH=no
+  fi
+  if [[ "$_AMNESIC" == yes ]]; then
+    _wipe_home -n
+    _AMNESIC=no
+  fi
+  if [[ -n "$_TMPDIR" ]]; then
+    rm -rf "$_TMPDIR"
+    _TMPDIR=""
+  fi
+}
+
+# parse options
+while getopts :Ad:Ghrs:u:vw _opt; do
+  case "$_opt" in
+    A) _AMNESIC=yes ;;
+    d) FSUNABA_HOST_DISPLAY="$OPTARG" ;;
+    G) FSUNABA_XEPHYR_OPTS="${FSUNABA_XEPHYR_OPTS} -no-host-grab" ;;
+    h) _usage; exit 0 ;;
+    r) FSUNABA_XEPHYR_OPTS="${FSUNABA_XEPHYR_OPTS} -resizeable" ;;
+    s)
+      WIDTH="${OPTARG%%x*}"
+      HEIGHT="${OPTARG##*x}"
+      _SIZE_SET=yes
+      ;;
+    u) FSUNABA_USER="$OPTARG" ;;
+    v) VERBOSE=true ;;
+    w) _WM="$FSUNABA_WM" ;;
+    :) _fatal "the '-${OPTARG}' option requires an argument" 2 ;;
+    ?) _fatal "unknown option '-${OPTARG}'" 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+# amnesic mode always runs as the amnesic sandbox user
+if [[ "$_AMNESIC" == yes ]]; then
+  FSUNABA_USER="$FSUNABA_AMNESIC_USER"
+fi
+
+# validate input
+[[ -n "$FSUNABA_HOST_DISPLAY" ]] \
+  || _fatal "no host X display; set DISPLAY or use the '-d' option"
+[[ $# -gt 0 ]] || { _usage >&2; _fatal "no command specified" 2; }
+case "$FSUNABA_USER" in
+  '' | -* | *[!A-Za-z0-9._-]*)
+    _fatal "invalid sandbox username '${FSUNABA_USER}'" 2
+    ;;
+esac
+if ! id -u "$FSUNABA_USER" >/dev/null 2>&1; then
+  if [[ "$_AMNESIC" == yes ]]; then
+    _fatal "amnesic user '${FSUNABA_USER}' does not exist; run 'make install-amnesic-user'"
+  fi
+  _fatal "sandbox user '${FSUNABA_USER}' does not exist"
+fi
+_require_positive_int width "$WIDTH"
+_require_positive_int height "$HEIGHT"
+_require_positive_int timeout "$FSUNABA_TIMEOUT"
+if [[ -n "$_WM" ]]; then
+  command -v "${_WM%% *}" >/dev/null \
+    || _fatal "window manager '${_WM%% *}' not found"
+fi
+
+# create private runtime state and clean it up on any exit or signal
+umask 077
+_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/fsunaba.XXXXXXXX")" \
+  || _fatal "could not create a temporary directory"
+_XAUTH="${_TMPDIR}/Xauthority"
+_DISPLAY_FILE="${_TMPDIR}/display"
+_XEPHYR_LOG="${_TMPDIR}/xephyr.log"
+: > "$_XAUTH"
+trap '_cleanup' EXIT
+trap '_cleanup; exit 129' HUP
+trap '_cleanup; exit 130' INT
+trap '_cleanup; exit 143' TERM
+
+# resolve the sandbox user's home directory
+_SANDBOX_HOME="$(getent passwd "$FSUNABA_USER" | cut -d: -f6)"
+[[ -n "$_SANDBOX_HOME" ]] \
+  || _fatal "could not determine the home directory of '${FSUNABA_USER}'"
+[[ -d "$_SANDBOX_HOME" ]] \
+  || _fatal "sandbox home '${_SANDBOX_HOME}' does not exist"
+
+# erase any leftovers from a previous amnesic session
+if [[ "$_AMNESIC" == yes ]]; then
+  _amnesic_guard
+  [[ "$VERBOSE" == true ]] && print "Wiping amnesic home '${_SANDBOX_HOME}'..."
+  _wipe_home || _fatal "could not erase the amnesic home directory"
+fi
+
+# append window geometry options for known applications, and let applications
+# with strict default window sizes pick their own sandbox display resolution
+case "${1##*/}" in
+  chrome | chromium | ungoogled-chromium)
+    set -- "$@" -window-size="${WIDTH},${HEIGHT}" --window-position=0,0
+    ;;
+  firefox)
+    set -- "$@" -width "$WIDTH" -height "$HEIGHT"
+    ;;
+  tor-browser)
+    # Tor Browser opens a 1000x1000 window by default and letterboxes its
+    # content to multiples of 200x100, so a 1000x1000 display keeps that
+    # default window size and does not change the browser fingerprint
+    if [[ "$_SIZE_SET" == no ]]; then
+      WIDTH=1000
+      HEIGHT=1000
+    fi
+    set -- "$@" -width "$WIDTH" -height "$HEIGHT"
+    ;;
+esac
+
+# generate an authentication cookie
+_MCOOKIE="$(openssl rand -hex 16)" \
+  || _fatal "could not generate an authentication cookie"
+
+# start Xephyr and let it pick an unused display; its diagnostics are captured
+# because scanning for a free display reports a benign "server already running"
+# error for every display that is already in use
+[[ "$VERBOSE" == true ]] \
+  && print "Starting Xephyr on host display '${FSUNABA_HOST_DISPLAY}'..."
+DISPLAY="$FSUNABA_HOST_DISPLAY" Xephyr ${FSUNABA_XEPHYR_OPTS} \
+  -auth "$_XAUTH" -displayfd 1 -screen "${WIDTH}x${HEIGHT}" -br \
+  -nolisten tcp >"$_DISPLAY_FILE" 2>"$_XEPHYR_LOG" &
+_XEPHYR_PID=$!
+
+# wait for Xephyr to report its display, with a timeout
+_waited=0
+while [[ ! -s "$_DISPLAY_FILE" ]]; do
+  if ! kill -0 "$_XEPHYR_PID" 2>/dev/null; then
+    _show_xephyr_log
+    _fatal "Xephyr exited before the sandbox display was ready"
+  fi
+  if (( _waited >= FSUNABA_TIMEOUT )); then
+    _show_xephyr_log
+    _fatal "timed out waiting for Xephyr to start"
+  fi
+  sleep 1
+  (( _waited++ ))
+done
+_DISPLAY=":$(cat "$_DISPLAY_FILE")"
+case "${_DISPLAY#:}" in '' | *[!0-9]*)
+  _fatal "Xephyr reported an invalid display '${_DISPLAY}'"
+  ;;
+esac
+
+# store the authentication cookie for the host and the sandbox user, feeding it
+# through a pipe because process arguments are readable by every local user
+[[ "$VERBOSE" == true ]] && print "Sandbox display is '${_DISPLAY}'."
+printf 'add %s . %s\n' "$_DISPLAY" "$_MCOOKIE" \
+  | xauth -f "$_XAUTH" source - \
+  || _fatal "could not store the host authentication cookie"
+_HOST_AUTH=yes
+_xa_out="$(printf 'add %s . %s\n' "$_DISPLAY" "$_MCOOKIE" \
+  | doas -u "$FSUNABA_USER" env HOME="$_SANDBOX_HOME" xauth source - 2>&1)" \
+  || _fatal "could not store the sandbox authentication cookie: ${_xa_out}"
+_SANDBOX_AUTH=yes
+
+# run the window manager, if requested, and the application, both in the
+# application's home directory and with a minimal environment, then propagate
+# the application's exit status. The application arguments are passed through
+# unchanged; the window manager command is the only one that is word-split. The
+# root cursor is set here as well, because without a window manager nothing does
+# it and popup windows without a cursor of their own would inherit the server
+# default, a large X.
+[[ "$VERBOSE" == true && -n "$_WM" ]] \
+  && print "Starting window manager '${_WM}' in the sandbox..."
+[[ "$VERBOSE" == true ]] \
+  && print "Launching '${1##*/}' as '${FSUNABA_USER}' on '${_DISPLAY}'..."
+doas -u "$FSUNABA_USER" /bin/sh -c '
+  home="$1"; display="$2"; wm="$3"
+  shift 3
+  cd "$home" || exit 1
+  if [ -n "$wm" ]; then
+    DISPLAY="$display" $wm >/dev/null 2>&1 &
+  fi
+  if [ -x /usr/X11R6/bin/xsetroot ]; then
+    /usr/X11R6/bin/xsetroot -display "$display" -cursor_name left_ptr 2>/dev/null
+  fi
+  exec "$@"
+' _ "$_SANDBOX_HOME" "$_DISPLAY" "$_WM" /usr/bin/env -i \
+  DISPLAY="$_DISPLAY" \
+  HOME="$_SANDBOX_HOME" \
+  LOGNAME="$FSUNABA_USER" \
+  USER="$FSUNABA_USER" \
+  PATH="/usr/bin:/bin:/usr/X11R6/bin:/usr/local/bin" \
+  "$@"
+_status=$?
+
+_cleanup
+exit "$_status"

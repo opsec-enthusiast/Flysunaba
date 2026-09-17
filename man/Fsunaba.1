@@ -1,0 +1,376 @@
+.Dd $Mdocdate: September 16 2026 $
+.Dt FSUNABA 1
+.Os
+.Sh NAME
+.Nm Fsunaba
+.Nd execute X applications in a sandboxed X display
+.Sh SYNOPSIS
+.Nm
+.Op Fl A
+.Op Fl h
+.Op Fl v
+.Op Fl r
+.Op Fl G
+.Op Fl d Ar display
+.Op Fl s Ar width Ns x Ns Ar height
+.Op Fl u Ar user
+.Op Fl w
+.Ar command
+.Op Ar argument ...
+.Sh DESCRIPTION
+The
+.Nm
+utility provides a rudimentary sandboxed environment, both user and
+.Xr X 7
+session, to run an X application in.
+The intent is to limit access to the user's own files and prevent the
+X application from accessing
+.Xr XEvents 3
+events destined for other applications, especially keyboard input.
+.Pp
+The sandbox consists of two parts:
+.Bl -enum -compact
+.It
+A separate, less privileged local user account that runs the application,
+restricting access to the invoking user's files according to their permissions.
+.It
+A nested
+.Xr Xephyr 1
+X server rendered into a window on the host display, isolating the application
+from the host X session.
+.El
+.Pp
+IMPORTANT:
+.Nm
+is a proof of concept and in no way guarantees that it will prevent access to
+your data.
+The sandbox does not restrict network, audio, or clipboard access by default,
+and the application runs with the full privileges of the sandbox user.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl A
+Run the application as the amnesic sandbox user and erase the contents of that
+user's home directory before and after the session.
+The amnesic user is configured with the
+.Ev FSUNABA_AMNESIC_USER
+environment variable and must first be created with
+.Ic make install-amnesic-user .
+The option takes precedence over
+.Fl u .
+.It Fl d Ar display
+Render the sandbox display into the given host
+.Xr X 7
+display.
+Defaults to the value of the
+.Ev DISPLAY
+environment variable.
+.It Fl G
+Pass the
+.Fl no-host-grab
+option to
+.Xr Xephyr 1 ,
+so the sandbox window does not grab the keyboard and mouse.
+.It Fl h
+Print a usage message and exit.
+.It Fl r
+Pass the
+.Fl resizeable
+option to
+.Xr Xephyr 1 ,
+making the sandbox window resizeable.
+.It Fl s Ar width Ns x Ns Ar height
+Set the sandbox display resolution in pixels, for example
+.Ar 1280x1024 .
+Defaults to 1024x768, except for applications with their own default, as
+described in
+.Sx APPLICATION DEFAULTS .
+.It Fl u Ar user
+Run the application as the named sandbox user.
+Defaults to the
+.Cm fsunaba
+user.
+The user must already exist.
+.It Fl v
+Show verbose output.
+.It Fl w
+Run a window manager inside the sandbox, before the application.
+The manager is
+.Cm cwm
+by default and can be changed with the
+.Ev FSUNABA_WM
+environment variable.
+A window manager is needed by applications that expect another client to give
+them the input focus, such as the popup menus of Firefox-based browsers; see
+.Sx CAVEATS .
+.El
+.Pp
+.Nm
+creates a private temporary directory with mode 700 to hold its X authority
+file and the diagnostic output of
+.Xr Xephyr 1 ,
+and removes it together with all authentication cookies when the application
+exits or the utility is interrupted.
+.Xr Xephyr 1
+selects an unused display itself and reports it through the
+.Fl displayfd
+mechanism; there is no fixed default display.
+.Pp
+The application receives a minimal environment consisting only of
+.Ev DISPLAY ,
+.Ev HOME ,
+.Ev LOGNAME ,
+.Ev USER ,
+and
+.Ev PATH ,
+its arguments are passed through unchanged, and it is started with its home
+directory as the working directory, since the invoking user's working directory
+is usually not readable by the sandbox user.
+The root cursor is set to the usual arrow, because a popup window that sets no
+cursor of its own would otherwise inherit the server default, a large X.
+.Sh APPLICATION DEFAULTS
+.Nm
+appends window geometry options for applications it recognizes, so that the
+application window fits the sandbox display:
+.Bl -tag -width "ungoogled-chromium" -compact
+.It chrome , chromium , ungoogled-chromium
+The
+.Ic -window-size=width,height
+and
+.Ic --window-position=0,0
+options.
+.It firefox
+The
+.Ic -width
+and
+.Ic -height
+options.
+.It tor-browser
+The
+.Ic -width
+and
+.Ic -height
+options, and, unless a size was requested with
+.Fl s
+or the
+.Ev WIDTH
+and
+.Ev HEIGHT
+environment variables, a 1000x1000 sandbox display.
+Tor Browser opens a 1000x1000 window by default and letterboxes its content to
+multiples of 200x100 pixels, so this keeps the browser's default window size
+and does not change its fingerprint.
+.El
+.Pp
+Applications not listed above receive no geometry options.
+.Pp
+With
+.Fl A ,
+the amnesic user's home directory is emptied before the application starts, so
+each session begins with an empty home, and it is emptied again when the session
+ends.
+Files left with restrictive permissions are made writable first, and
+.Nm
+reports an error if anything survives the erase.
+.Nm
+refuses to run amnesic mode as root, against the invoking user, against
+.Cm root ,
+or when the amnesic home is not under
+.Pa /home .
+Data written outside the home directory, such as in
+.Pa /tmp ,
+is not erased.
+.Pp
+.Nm
+is a
+.Xr ksh 1
+script and requires the
+.Xr ksh 1
+that ships with
+.Ox .
+.Sh ENVIRONMENT
+The following environment variables affect
+.Nm
+behavior:
+.Bl -tag -width "FSUNABA_XEPHYR_OPTS"
+.It Ev VERBOSE
+Show verbose output if set to
+.Sq true ,
+otherwise suppress it.
+Defaults to
+.Sq false .
+.It Ev FSUNABA_WM
+Window manager to run when the
+.Fl w
+option is given.
+Defaults to
+.Cm cwm .
+.It Ev FSUNABA_WM
+Window manager to run inside the sandbox when the
+.Fl w
+option is given.
+Defaults to
+.Cm cwm .
+.It Ev FSUNABA_HOST_DISPLAY
+Host
+.Xr X 7
+display to render the sandbox into.
+Overridden by the
+.Fl d
+option.
+.It Ev FSUNABA_USER
+Username to run the application as.
+Overridden by the
+.Fl u
+option.
+Defaults to
+.Cm fsunaba .
+.It Ev FSUNABA_AMNESIC_USER
+Username of the amnesic sandbox user used by the
+.Fl A
+option.
+Defaults to the sandbox user name followed by
+.Cm -amnesic ,
+for example
+.Cm fsunaba-amnesic .
+.It Ev WIDTH
+Sandbox display width in pixels.
+Overridden by the
+.Fl s
+option.
+Defaults to 1024.
+.It Ev HEIGHT
+Sandbox display height in pixels.
+Overridden by the
+.Fl s
+option.
+Defaults to 768.
+.It Ev FSUNABA_TIMEOUT
+Number of seconds to wait for
+.Xr Xephyr 1
+to become ready.
+Defaults to 10.
+.It Ev FSUNABA_XEPHYR_OPTS
+Additional options to pass to
+.Xr Xephyr 1 .
+The
+.Fl r
+and
+.Fl G
+options append to this value.
+.El
+.Sh EXIT STATUS
+.Ex -std
+If the application exits normally, its exit status is returned.
+Interruption by a signal exits with 128 plus the signal number.
+.Sh EXAMPLES
+Open a
+.Xr firefox 1
+private browser window in a sandboxed display:
+.Pp
+.Dl $ Fsunaba firefox --private-window
+.Pp
+Run a command as a different sandbox user on a specific host display:
+.Pp
+.Dl $ Fsunaba -u alt-sandbox -d :0 xterm
+.Pp
+Run a browser with an empty, discarded home directory:
+.Pp
+.Dl $ Fsunaba -A firefox --private-window
+.Pp
+Run Tor Browser at its default window size:
+.Pp
+.Dl $ Fsunaba tor-browser
+.Pp
+Run a browser with a window manager in the sandbox, so its popup menus work:
+.Pp
+.Dl $ Fsunaba -w tor-browser
+.Sh SEE ALSO
+.Xr doas 1 ,
+.Xr ksh 1 ,
+.Xr openssl 1 ,
+.Xr xauth 1 ,
+.Xr Xephyr 1 ,
+.Xr XEvents 3 ,
+.Xr X 7
+.Sh HISTORY
+.Nm
+is part of Flysunaba, a fork of
+.Ox
+Xsunaba, which in turn is based on a script by Milosz Galazka.
+.Sh CAVEATS
+Hardware acceleration is not available, so OpenGL applications fall back to
+software rendering.
+Applications using software rendering, notably
+.Xr firefox 1
+and Tor Browser, may print a
+.Ic RenderCompositorSWGL failed mapping default framebuffer
+warning, in particular while closing a window or a popup.
+The warning is harmless and does not affect the application.
+.Pp
+The sandbox does not run a display manager or a window manager by default, and
+does not execute the sandbox user's
+.Pa ~/.xsession
+or
+.Pa ~/.xinitrc .
+Use a wrapper script to configure and start an application that needs specific
+environment setup.
+.Pp
+Without a window manager nothing moves the input focus off the pointer, so a
+popup window that takes the focus away from the application window makes the
+application close it: Firefox-based browsers, for example, close the hamburger
+menu, the bookmarks and the security panel as soon as the pointer reaches them.
+Running with
+.Fl w
+adds a window manager that manages the focus, which fixes those popups.
+An application that instead expects to grab the pointer for its popups, such as
+older Firefox-based browsers, cannot be fixed from outside and needs a version
+where that path works.
+.Pp
+Setting the root cursor, as
+.Nm
+does, only removes the large X that a popup without a cursor of its own would
+show; it does not keep such popups open.
+.Pp
+.Xr Xephyr 1
+reports an error for every display that is already in use while it searches for
+a free one, for example
+.Ic server already running
+for the host display.
+.Nm
+captures that diagnostic output and shows it only if
+.Xr Xephyr 1
+fails to start.
+.Sh SECURITY CONSIDERATIONS
+.Nm
+does not isolate the sandbox from the network.
+An application with network access can exfiltrate any file the sandbox user can
+read.
+The application runs with the full privileges of the sandbox user, so it can
+also write to its home directory and
+.Pa /tmp ,
+reach services on
+.Cm localhost ,
+read the sandbox user's
+.Pa ~/.Xauthority ,
+exhaust local resources, and reach
+.Xr Xephyr 1
+and the kernel through their own bugs.
+.Pp
+The X authentication cookie is passed to
+.Xr xauth 1
+through a pipe, so it does not appear in the process list where other local
+users could read it.
+.Pp
+Audio and clipboard access are not shared by default.
+Copying the invoking user's
+.Xr sndio 7
+cookie into the sandbox grants it access to the audio session, including the
+microphone when kernel audio recording is enabled.
+.Pp
+The sandbox confines the application no further than the sandbox user, the
+sandbox display, and the erased home directory do.
+.Pp
+Amnesic mode erases the contents of the amnesic user's home directory, but the
+directory itself is owned by that user and cannot be removed without root
+privileges, and data written outside of it is left behind.
