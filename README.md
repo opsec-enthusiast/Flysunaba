@@ -18,7 +18,7 @@ For those using `Fsunaba` under OpenBSD, some X applications in ports utilize th
 Limitations due to implementation via `Xephyr`:
 
 * Hardware acceleration is not supported for X applications using OpenGL, so the sandbox only provides software rasterization via the [LLVMpipe](https://docs.mesa3d.org/drivers/llvmpipe.html) driver. This _may_ be performant enough for some 2D rendering, but 3D rendering performance will be abysmal.
-* The sandbox does not provide a display manager (DM), so will not execute the sandbox user's `~/.xsession`, `~/.xinitrc`, nor initialize a window manager (WM). If specific environment configuration is necessary for an X application to run correctly in the sandbox, it is suggested to create a wrapper script to configure & execute the application, then execute the wrapper script with `Fsunaba`.
+* The sandbox does not provide a display manager (DM), so will not execute the sandbox user's `~/.xsession` or `~/.xinitrc`. Window managers do not run by default either, because some applications expect to be the only client; use `-w` to run one when an application needs it (see [Options](#options) and [Troubleshooting](#troubleshooting)). If specific environment configuration is necessary for an X application to run correctly in the sandbox, it is suggested to create a wrapper script to configure & execute the application, then execute the wrapper script with `Fsunaba`.
 
 ## PREREQUISITES
 
