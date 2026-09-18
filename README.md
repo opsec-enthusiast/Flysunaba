@@ -64,6 +64,7 @@ On OpenBSD, Xenocara is still the base graphical stack; Wayland compositors are 
 
 * [xclip(1)](https://github.com/astrand/xclip)
 * [sndio(7)](https://man.openbsd.org/sndio)
+* [xdotool(1)](https://github.com/jordansissel/xdotool), so application windows follow a resized sandbox display (see `-r`); without it, `-r` resizes the display only.
 
 ## INSTALLATION
 
@@ -112,7 +113,7 @@ Fsunaba [-hvrGAw] [-d display] [-s widthxheight] [-u user] command [argument ...
 * `-d display`: host X display to render the sandbox into. Default: `DISPLAY`.
 * `-G`: pass `-no-host-grab` to `Xephyr`, so the sandbox window does not grab the keyboard and mouse.
 * `-h`: show help and exit.
-* `-r`: pass `-resizeable` to `Xephyr`, so the sandbox window is resizeable.
+* `-r`: pass `-resizeable` to `Xephyr`, so the sandbox window can be resized. With [xdotool(1)](https://github.com/jordansissel/xdotool) installed, the largest application window is resized to fill the new display; without it, only the display resizes; see [Troubleshooting](#troubleshooting).
 * `-s widthxheight`: sandbox display resolution in pixels, e.g. `1280x1024`. Default: `1024x768`, except for [`tor-browser`](#application-defaults).
 * `-u user`: sandbox user to run the command as. Default: `fsunaba`.
 * `-v`: show verbose output.
@@ -236,6 +237,7 @@ If audio is failing to play from applications within the Flysunaba sandbox, firs
 * `Crash Annotation GraphicsCriticalError: |[0][GFX1-]: RenderCompositorSWGL failed mapping default framebuffer, no dt`: harmless warning from Firefox-based browsers (including Tor Browser) using the software compositor, which is always the case in the sandbox because there is no hardware acceleration. It appears while a window or popup is unmapped, for example when closing the browser, and does not affect it. Newer Firefox releases no longer print it.
 * Amnesic mode reports that the home is not empty after erasing: something is still writing to the amnesic home, usually an application that outlived its launcher. Close it and run `Fsunaba -A` again.
 * Tor Browser or Firefox menus (the hamburger menu, bookmarks, the security panel) close as soon as the mouse reaches them, and the cursor turns into a large X: by default the sandbox runs no window manager, so the X server moves the input focus with the pointer and the application closes its own popup when the popup takes that focus. Run `Fsunaba -w tor-browser` to put a window manager in the sandbox, which handles the focus and keeps those popups open. The X cursor is the server's default root cursor; `Fsunaba` sets the usual arrow, but that alone does not keep a popup open.
+* Resizing the sandbox window with `-r` resizes the sandbox display, but `Xephyr` cannot resize application windows, so on its own the application keeps its size. With `xdotool` installed, `Fsunaba` checks the display size once per second and resizes the largest application window to fill the new display, so it keeps using the whole sandbox with or without a window manager. Without `xdotool`, a window follows only if the window manager re-tiles or re-maximizes its clients on a screen change; the default `cwm` does not, and the base managers that do (`twm`, `fvwm`) make Firefox-based browsers, including Tor Browser, use the popup pointer grab that breaks their menus, so use a re-tiling manager (`FSUNABA_WM=i3 Fsunaba -r -w <app>`) or start at the wanted size with `-s`.
 
 ## SECURITY
 
@@ -245,6 +247,7 @@ If audio is failing to play from applications within the Flysunaba sandbox, firs
 * `Fsunaba` stores its X authority file in a private, mode `700` temporary directory, and removes it, along with all authentication cookies, when the application exits or the utility is interrupted.
 * The authentication cookie is fed to `xauth` through a pipe instead of the command line, because process arguments are readable by every local user on OpenBSD.
 * The sandboxed application runs with a minimal environment (`DISPLAY`, `HOME`, `LOGNAME`, `USER`, `PATH`), with its home directory as the working directory, and with its arguments unchanged.
+* The optional `xdotool` helper that makes the largest window follow `-r` runs inside the sandbox as the sandbox user, like the application, and talks only to the sandbox display; it cannot reach your X session.
 * `make install` validates the sandbox username and `/etc/doas.conf` before changing them, refuses to modify an invalid `doas.conf`, and makes the sandbox user's home directory non-writable by group and others.
 * Amnesic mode erases the contents of the amnesic home but cannot remove the home directory itself, and never touches data outside it.
 
