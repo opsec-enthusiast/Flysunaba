@@ -1,4 +1,4 @@
-.Dd $Mdocdate: September 16 2026 $
+.Dd $Mdocdate: September 18 2026 $
 .Dt FSUNABA 1
 .Os
 .Sh NAME
@@ -111,10 +111,16 @@ file and the diagnostic output of
 .Xr Xephyr 1 ,
 and removes it together with all authentication cookies when the application
 exits or the utility is interrupted.
+Each invocation gets its own X display:
+.Nm
+picks the lowest display number that is free on the host and starts
 .Xr Xephyr 1
-selects an unused display itself and reports it through the
-.Fl displayfd
-mechanism; there is no fixed default display.
+on it, so
+.Xr Xephyr 1
+locks that display.
+A second invocation started while the first is running therefore uses a
+different display, and neither application can read the other's windows or
+inject events into them.
 .Pp
 The application receives a minimal environment consisting only of
 .Ev DISPLAY ,
@@ -332,15 +338,13 @@ Setting the root cursor, as
 does, only removes the large X that a popup without a cursor of its own would
 show; it does not keep such popups open.
 .Pp
+If another process takes the chosen display number before
 .Xr Xephyr 1
-reports an error for every display that is already in use while it searches for
-a free one, for example
-.Ic server already running
-for the host display.
+starts,
 .Nm
-captures that diagnostic output and shows it only if
-.Xr Xephyr 1
-fails to start.
+retries with the next free number.
+The diagnostic output of such an attempt is captured and shown only when no
+display can be started.
 .Sh SECURITY CONSIDERATIONS
 .Nm
 does not isolate the sandbox from the network.
@@ -370,6 +374,16 @@ microphone when kernel audio recording is enabled.
 .Pp
 The sandbox confines the application no further than the sandbox user, the
 sandbox display, and the erased home directory do.
+.Pp
+Separate displays keep concurrent sessions apart in X, but two sessions that
+run as the same sandbox user still share that user's home directory and
+.Pa ~/.Xauthority ,
+so each can reach the other's display.
+Give each concurrent session its own sandbox user with
+.Fl u
+when they must not reach each other.
+Amnesic mode wipes one shared home directory and is meant for one session at a
+time.
 .Pp
 Amnesic mode erases the contents of the amnesic user's home directory, but the
 directory itself is owned by that user and cannot be removed without root
