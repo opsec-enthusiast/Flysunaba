@@ -66,8 +66,8 @@ _XEPHYR_PID=""
 _XEPHYR_LOG=""
 _TMPDIR=""
 _XAUTH=""
-_DISPLAY_FILE=""
 _DISPLAY=""
+_DISPLAY_NUM=""
 _SANDBOX_HOME=""
 _HOST_AUTH=no
 _SANDBOX_AUTH=no
@@ -129,6 +129,33 @@ _show_xephyr_log() {
   [[ -s "$_XEPHYR_LOG" ]] || return 0
   print -u2 -r -- "${_tool}: Xephyr reported:"
   cat "$_XEPHYR_LOG" >&2
+}
+
+# print the numeric part of an X display name, when it has one
+_host_display_number() {
+  local display="${1##*:}"
+  display="${display%%.*}"
+  case "$display" in
+    '' | *[!0-9]*) return 0 ;;
+  esac
+  print "$display"
+}
+
+# print the lowest display number that is free on this host, skipping the host
+# display itself and every display that already has a lock file or a socket
+_free_display() {
+  local host="${1:-}"
+  local number=0
+  while (( number < 1000 )); do
+    if [[ ":${number}" != ":${host}" ]] \
+      && [[ ! -e "/tmp/.X${number}-lock" ]] \
+      && [[ ! -e "/tmp/.X11-unix/X${number}" ]]; then
+      print "$number"
+      return 0
+    fi
+    (( number++ ))
+  done
+  return 1
 }
 
 # erase every entry inside the sandbox home directory, then report leftovers
@@ -240,7 +267,6 @@ umask 077
 _TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/fsunaba.XXXXXXXX")" \
   || _fatal "could not create a temporary directory"
 _XAUTH="${_TMPDIR}/Xauthority"
-_DISPLAY_FILE="${_TMPDIR}/display"
 _XEPHYR_LOG="${_TMPDIR}/xephyr.log"
 : > "$_XAUTH"
 trap '_cleanup' EXIT
@@ -287,43 +313,60 @@ esac
 _MCOOKIE="$(openssl rand -hex 16)" \
   || _fatal "could not generate an authentication cookie"
 
-# start Xephyr and let it pick an unused display; its diagnostics are captured
-# because scanning for a free display reports a benign "server already running"
-# error for every display that is already in use
+# choose a free display and start Xephyr on it, retrying if a second invocation
+# takes the same number first. Xephyr's -displayfd is deliberately not used: it
+# disables the server lock and then takes over a socket already owned by the same
+# user, so a second session would end up sharing the first one's display.
 [[ "$VERBOSE" == true ]] \
   && print "Starting Xephyr on host display '${FSUNABA_HOST_DISPLAY}'..."
-DISPLAY="$FSUNABA_HOST_DISPLAY" Xephyr ${FSUNABA_XEPHYR_OPTS} \
-  -auth "$_XAUTH" -displayfd 1 -screen "${WIDTH}x${HEIGHT}" -br \
-  -nolisten tcp >"$_DISPLAY_FILE" 2>"$_XEPHYR_LOG" &
-_XEPHYR_PID=$!
+_tries=0
+while :; do
+  _DISPLAY_NUM="$(_free_display "$(_host_display_number "$FSUNABA_HOST_DISPLAY")")" \
+    || _fatal "could not find a free display number"
+  _DISPLAY=":${_DISPLAY_NUM}"
+  printf 'add %s . %s\n' "$_DISPLAY" "$_MCOOKIE" \
+    | xauth -f "$_XAUTH" source - \
+    || _fatal "could not store the host authentication cookie"
+  _HOST_AUTH=yes
+  DISPLAY="$FSUNABA_HOST_DISPLAY" Xephyr "$_DISPLAY" ${FSUNABA_XEPHYR_OPTS} \
+    -auth "$_XAUTH" -screen "${WIDTH}x${HEIGHT}" -br \
+    -nolisten tcp >"$_XEPHYR_LOG" 2>&1 &
+  _XEPHYR_PID=$!
 
-# wait for Xephyr to report its display, with a timeout
-_waited=0
-while [[ ! -s "$_DISPLAY_FILE" ]]; do
-  if ! kill -0 "$_XEPHYR_PID" 2>/dev/null; then
-    _show_xephyr_log
-    _fatal "Xephyr exited before the sandbox display was ready"
+  # wait for Xephyr to create the display socket, with a timeout
+  _waited=0
+  while [[ ! -e "/tmp/.X11-unix/X${_DISPLAY_NUM}" ]]; do
+    if ! kill -0 "$_XEPHYR_PID" 2>/dev/null; then
+      break
+    fi
+    if (( _waited >= FSUNABA_TIMEOUT )); then
+      _show_xephyr_log
+      _fatal "timed out waiting for Xephyr to start"
+    fi
+    sleep 1
+    (( _waited++ ))
+  done
+  if kill -0 "$_XEPHYR_PID" 2>/dev/null \
+    && [[ -e "/tmp/.X11-unix/X${_DISPLAY_NUM}" ]]; then
+    break
   fi
-  if (( _waited >= FSUNABA_TIMEOUT )); then
+
+  # the display was taken in the meantime; drop it and try another number
+  kill "$_XEPHYR_PID" 2>/dev/null
+  wait "$_XEPHYR_PID" 2>/dev/null
+  _XEPHYR_PID=""
+  xauth -f "$_XAUTH" remove "$_DISPLAY" 2>/dev/null
+  _HOST_AUTH=no
+  (( _tries++ ))
+  if (( _tries >= 5 )); then
     _show_xephyr_log
-    _fatal "timed out waiting for Xephyr to start"
+    _fatal "could not start Xephyr on a free display"
   fi
-  sleep 1
-  (( _waited++ ))
 done
-_DISPLAY=":$(cat "$_DISPLAY_FILE")"
-case "${_DISPLAY#:}" in '' | *[!0-9]*)
-  _fatal "Xephyr reported an invalid display '${_DISPLAY}'"
-  ;;
-esac
 
-# store the authentication cookie for the host and the sandbox user, feeding it
-# through a pipe because process arguments are readable by every local user
+# store the authentication cookie for the sandbox user, feeding it through a
+# pipe because process arguments are readable by every local user
 [[ "$VERBOSE" == true ]] && print "Sandbox display is '${_DISPLAY}'."
-printf 'add %s . %s\n' "$_DISPLAY" "$_MCOOKIE" \
-  | xauth -f "$_XAUTH" source - \
-  || _fatal "could not store the host authentication cookie"
-_HOST_AUTH=yes
 _xa_out="$(printf 'add %s . %s\n' "$_DISPLAY" "$_MCOOKIE" \
   | doas -u "$FSUNABA_USER" env HOME="$_SANDBOX_HOME" xauth source - 2>&1)" \
   || _fatal "could not store the sandbox authentication cookie: ${_xa_out}"
