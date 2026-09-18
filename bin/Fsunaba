@@ -262,6 +262,24 @@ if [[ -n "$_WM" ]]; then
     || _fatal "window manager '${_WM%% *}' not found"
 fi
 
+# make application windows follow a resizeable sandbox display when the optional
+# xdotool is available; without it, -r only resizes the display itself. The path
+# is fixed, not taken from PATH, because it is executed in the sandbox.
+case " ${FSUNABA_XEPHYR_OPTS} " in
+  *" -resizeable "*)
+    _XDOOL=""
+    for _xd in /usr/local/bin/xdotool /usr/bin/xdotool /usr/X11R6/bin/xdotool; do
+      if [[ -x "$_xd" ]]; then
+        _XDOOL="$_xd"
+        break
+      fi
+    done
+    if [[ -z "$_XDOOL" && "$VERBOSE" == true ]]; then
+      print "${_tool}: xdotool not found; the application will not follow resizes."
+    fi
+    ;;
+esac
+
 # create private runtime state and clean it up on any exit or signal
 umask 077
 _TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/fsunaba.XXXXXXXX")" \
@@ -378,23 +396,66 @@ _SANDBOX_AUTH=yes
 # unchanged; the window manager command is the only one that is word-split. The
 # root cursor is set here as well, because without a window manager nothing does
 # it and popup windows without a cursor of their own would inherit the server
-# default, a large X.
+# default, a large X. When the sandbox display is resizeable and xdotool is
+# installed, a small helper keeps application windows matched to the new size.
 [[ "$VERBOSE" == true && -n "$_WM" ]] \
   && print "Starting window manager '${_WM}' in the sandbox..."
 [[ "$VERBOSE" == true ]] \
   && print "Launching '${1##*/}' as '${FSUNABA_USER}' on '${_DISPLAY}'..."
 doas -u "$FSUNABA_USER" /bin/sh -c '
-  home="$1"; display="$2"; wm="$3"
-  shift 3
+  home="$1"; display="$2"; wm="$3"; xtool="$4"
+  shift 4
+  PATH="/usr/bin:/bin:/usr/X11R6/bin:/usr/local/bin"
+  export PATH
   cd "$home" || exit 1
+  # resize the largest visible window to the new display size; a window that
+  # filled the display is the largest one, and this also covers a session
+  # without a window manager, where nothing can maximize a window
+  _follow_resize() {
+    _robot="$1"; _dpy="$2"; _old=""
+    while :; do
+      _new="$(DISPLAY="$_dpy" "$_robot" getdisplaygeometry 2>/dev/null)" || exit 0
+      set -- $_new
+      [ "$#" -eq 2 ] || { _old=""; sleep 1; continue; }
+      case "$1$2" in
+        *[!0-9]*) _old=""; sleep 1; continue ;;
+      esac
+      _nw="$1"; _nh="$2"
+      if [ -n "$_old" ]; then
+        _best=""; _bestarea=0
+        for _win in $(DISPLAY="$_dpy" "$_robot" search --onlyvisible . 2>/dev/null); do
+          _geom="$(DISPLAY="$_dpy" "$_robot" getwindowgeometry --shell "$_win" 2>/dev/null)"
+          _gw="$(printf "%s\n" "$_geom" | sed -n "s/^WIDTH=//p")"
+          _gh="$(printf "%s\n" "$_geom" | sed -n "s/^HEIGHT=//p")"
+          [ -n "$_gw" ] || continue
+          [ -n "$_gh" ] || continue
+          case "$_gw" in *[!0-9]*) continue ;; esac
+          case "$_gh" in *[!0-9]*) continue ;; esac
+          _area=$(( _gw * _gh ))
+          if [ "$_area" -gt "$_bestarea" ]; then
+            _bestarea="$_area"
+            _best="$_win"
+          fi
+        done
+        if [ -n "$_best" ]; then
+          DISPLAY="$_dpy" "$_robot" windowsize "$_best" 100% 100% 2>/dev/null
+        fi
+      fi
+      _old="$_nw $_nh"
+      sleep 1
+    done
+  }
   if [ -n "$wm" ]; then
     DISPLAY="$display" $wm >/dev/null 2>&1 &
+  fi
+  if [ -n "$xtool" ]; then
+    _follow_resize "$xtool" "$display" &
   fi
   if [ -x /usr/X11R6/bin/xsetroot ]; then
     /usr/X11R6/bin/xsetroot -display "$display" -cursor_name left_ptr 2>/dev/null
   fi
   exec "$@"
-' _ "$_SANDBOX_HOME" "$_DISPLAY" "$_WM" /usr/bin/env -i \
+' _ "$_SANDBOX_HOME" "$_DISPLAY" "$_WM" "$_XDOOL" /usr/bin/env -i \
   DISPLAY="$_DISPLAY" \
   HOME="$_SANDBOX_HOME" \
   LOGNAME="$FSUNABA_USER" \
