@@ -27,6 +27,9 @@ original it fixes. Behavior is documented in the
 * **Per-session display selection**: `Fsunaba` picks the lowest display number
   that is free on the host and starts `Xephyr` on it, so each invocation gets a
   locked, separate display. There is no fixed `:32` starting point.
+* **Window resize follow**: with `-r` and the optional `xdotool`, the largest
+  application window is resized to fill the new sandbox display when the sandbox
+  window is resized, instead of leaving the application at its original size.
 * **A startup handshake**: the display socket is waited for with a timeout
   (`FSUNABA_TIMEOUT`), and startup aborts if `Xephyr` exits, instead of a fixed
   one-second `sleep`.
