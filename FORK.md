@@ -24,9 +24,10 @@ original it fixes. Behavior is documented in the
 * **A command-line interface**: `-d display`, `-u user`, `-s widthxheight`, `-r`,
   `-G`, `-A`, `-v`, and `-h` for help, instead of configuring everything through
   environment variables.
-* **Free display selection**: `Xephyr -displayfd` reports the display it picked.
-  There is no fixed `:32` starting point and no scan of `/tmp/.X11-unix`.
-* **A startup handshake**: the display is waited for with a timeout
+* **Per-session display selection**: `Fsunaba` picks the lowest display number
+  that is free on the host and starts `Xephyr` on it, so each invocation gets a
+  locked, separate display. There is no fixed `:32` starting point.
+* **A startup handshake**: the display socket is waited for with a timeout
   (`FSUNABA_TIMEOUT`), and startup aborts if `Xephyr` exits, instead of a fixed
   one-second `sleep`.
 * **Cleanup on every exit path**: a private, mode `700` temporary directory holds
@@ -101,10 +102,11 @@ original it fixes. Behavior is documented in the
 * **No error checking.** A missing sandbox user, a failed `xauth`, or an `Xephyr`
   that died at startup all went unnoticed, and the application's exit status was
   discarded in favour of the final `xauth remove`.
-* **The display was chosen by scanning socket files**, which races: a stale
-  socket, or another process taking the display between the check and the start,
-  yields a broken session. `-displayfd` reports the display that was actually
-  acquired.
+* **The sandbox display was fixed**: the original always started at `:32` and
+  only skipped displays whose socket already existed. `Fsunaba` picks the lowest
+  free display number, skipping the host display, lock files, and sockets, starts
+  `Xephyr` on it so the number is locked, and retries with the next free number
+  if another process takes it first.
 * **The fixed `sleep 1`** either wasted time or started the application before
   the display was ready.
 * **`uninstall-user` and `uninstall`** failed when the user or the installed
