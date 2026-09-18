@@ -79,6 +79,13 @@ Pass the
 option to
 .Xr Xephyr 1 ,
 making the sandbox window resizeable.
+Resizing the window resizes the sandbox display.
+If the optional
+.Cm xdotool
+command is installed,
+.Nm
+also resizes the largest application window to fill the new display; see
+.Sx CAVEATS .
 .It Fl s Ar width Ns x Ns Ar height
 Set the sandbox display resolution in pixels, for example
 .Ar 1280x1024 .
@@ -337,6 +344,39 @@ Setting the root cursor, as
 .Nm
 does, only removes the large X that a popup without a cursor of its own would
 show; it does not keep such popups open.
+.Pp
+The
+.Fl r
+option makes the sandbox window resizeable, and
+.Xr Xephyr 1
+resizes the sandbox display to match, but it does not resize application
+windows.
+When the optional
+.Cm xdotool
+command is installed,
+.Nm
+checks the display size once per second and resizes the largest application
+window to fill the new display, with or without a window manager.
+Without it, an application fills the new space only if the window manager
+resizes or re-maximizes its windows when the screen changes.
+The default
+.Cm cwm
+updates its own geometry but leaves existing windows alone, and the base window
+managers that react to a screen change,
+.Cm twm
+and
+.Cm fvwm ,
+make Firefox-based browsers use a popup pointer grab that breaks their menus.
+Run a re-tiling window manager through
+.Ev FSUNABA_WM ,
+such as
+.Cm i3 ,
+.Cm awesome ,
+.Cm bspwm
+or
+.Cm xmonad ,
+or start at the size you want with
+.Fl s .
 .Pp
 If another process takes the chosen display number before
 .Xr Xephyr 1
