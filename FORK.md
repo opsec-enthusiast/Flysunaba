@@ -27,19 +27,28 @@ original it fixes. Behavior is documented in the
 * **Per-session display selection**: `Fsunaba` picks the lowest display number
   that is free on the host and starts `Xephyr` on it, so each invocation gets a
   locked, separate display. There is no fixed `:32` starting point.
-* **Window resize follow**: with `-r` and the optional `xdotool`, the largest
-  application window is resized to fill the new sandbox display when the sandbox
-  window is resized, instead of leaving the application at its original size.
+* **Window sizing with the optional `xdotool`**: the largest application window
+  is kept matched to the sandbox display, while a Firefox-based browser starts
+  and whenever the sandbox display changes with `-r`. A browser sizes its window
+  from the screen, so without this it can start short of the display, leaving a
+  strip of background, or larger than it, hiding the bottom of the page.
 * **A startup handshake**: the display socket is waited for with a timeout
   (`FSUNABA_TIMEOUT`), and startup aborts if `Xephyr` exits, instead of a fixed
   one-second `sleep`.
 * **Cleanup on every exit path**: a private, mode `700` temporary directory holds
-  the X authority file and the `Xephyr` diagnostics, and traps on `EXIT`, `HUP`,
-  `INT`, and `TERM` remove it together with both authentication cookies.
-* **An explicit minimal environment**: `DISPLAY`, `HOME`, `LOGNAME`, `USER`, and
-  `PATH`, with the application's working directory set to its home.
-* **Input validation** of the sandbox username, width, height, and timeout before
-  anything runs, with usage errors exiting `2` and runtime errors exiting `1`.
+  the `Xephyr` authority file and its diagnostics, and traps on `EXIT`, `HUP`,
+  `INT`, and `TERM` remove it together with the cookies.
+* **An explicit minimal environment**: `DISPLAY`, `HOME`, `LOGNAME`, `USER`,
+  `XAUTHORITY`, and `PATH`, the application's working directory set to its home,
+  and `umask 077` so the files it creates stay private.
+* **A per-session X authority file**: the sandbox cookie lives in
+  `~/.fsunaba/Xauthority.<display number>`, mode `600`, and is removed when the
+  session ends, instead of the sandbox user's shared `~/.Xauthority`.
+* **Input validation and refusals before anything runs**: the sandbox username,
+  width, height, and timeout; a non-root invoking user; a sandbox user outside
+  `wheel` and `operator`; and the sandbox-weakening `Xephyr` options `-ac`,
+  `-auth`, `-nolock`, `-listen`, and `+iglx` in `FSUNABA_XEPHYR_OPTS`. Usage
+  errors exit `2` and runtime errors exit `1`.
 * **The application's exit status** is returned; interruption exits
   `128 + signal`.
 * **Geometry hints** for `chromium`, `ungoogled-chromium`, and `tor-browser` (in
@@ -51,14 +60,13 @@ original it fixes. Behavior is documented in the
   leftovers reported as an error.
 * **A window manager on request**: `-w` runs `cwm` inside the sandbox, which is
   what applications with popup menus need; see Usability below.
-* **A hardened `Makefile`**: `install-user`, `install-amnesic-user`, and
-  `install-doas` validate the usernames; `install-doas` validates
-  `/etc/doas.conf` with `doas -C` before touching it; the normal and amnesic
-  rules are added and removed idempotently with anchored patterns; the sandbox
-  home is made non-writable by group and others; `install-amnesic-user` and
-  `uninstall-amnesic-user` exist; `install` and `uninstall` rebuild the manual
-  page index with `makewhatis`, so `man Fsunaba` finds the page; `uninstall-user`
-  and `uninstall` no longer fail when things are already gone.
+* **A hardened `Makefile`**: usernames are validated; `/etc/doas.conf` is
+  validated with `doas -C` and edited through a renamed copy; rules are matched
+  and removed as whole lines; `install` writes through a temporary name; the
+  sandbox home is made non-writable by group and others; `install-amnesic-user`
+  and `uninstall-amnesic-user` exist; `install` and `uninstall` rebuild the
+  manual page index with `makewhatis`, so `man Fsunaba` finds the page;
+  `uninstall-user` and `uninstall` no longer fail when things are already gone.
 * **`ksh`**, the shell that ships with OpenBSD, instead of plain `sh`, and
   `${var:-default}` instead of `${var:=default}`, with `$(...)` instead of
   backticks.
@@ -96,7 +104,8 @@ original it fixes. Behavior is documented in the
   installed no signal handlers: killing it left the sandbox display running.
 * **`Makefile`:** `uninstall-doas` used `grep -p`, which OpenBSD `grep` does not
   support, so removing a rule always failed; `install-doas` chowned and chmodded
-  an existing `/etc/doas.conf` unconditionally, never validated it, and detected
+  an existing `/etc/doas.conf` unconditionally, never validated it, edited it in
+  place so an interrupted run could leave a partial rule behind, and detected
   existing rules with an unanchored `grep` that a longer username such as
   `xsunaba2` defeated; usernames were never validated.
 
