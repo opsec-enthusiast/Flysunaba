@@ -89,6 +89,16 @@ permit nopass <username> as fsunaba
 permit nopass <username> as fsunaba-amnesic
 ```
 
+### UNINSTALLING
+
+`make uninstall` removes the script, the manual page, the sandbox users and the `doas` rules:
+
+```
+$ doas make uninstall USER="$USER"
+```
+
+The individual `uninstall-user`, `uninstall-amnesic-user`, `uninstall-doas` and `uninstall-sndio-cookie` targets undo one piece each. All of them are safe to run again, and none of them fails when the piece is already gone.
+
 ## USAGE
 
 Prefix your X application command with `Fsunaba`, for example:
@@ -113,9 +123,9 @@ Fsunaba [-hvrGAw] [-d display] [-s widthxheight] [-u user] command [argument ...
 * `-d display`: host X display to render the sandbox into. Default: `DISPLAY`.
 * `-G`: pass `-no-host-grab` to `Xephyr`, so the sandbox window does not grab the keyboard and mouse.
 * `-h`: show help and exit.
-* `-r`: pass `-resizeable` to `Xephyr`, so the sandbox window can be resized. With [xdotool(1)](https://github.com/jordansissel/xdotool) installed, the largest application window is resized to fill the new display; without it, only the display resizes; see [Troubleshooting](#troubleshooting).
-* `-s widthxheight`: sandbox display resolution in pixels, e.g. `1280x1024`. Default: `1024x768`, except for [`tor-browser`](#application-defaults).
-* `-u user`: sandbox user to run the command as. Default: `fsunaba`.
+* `-r`: pass `-resizeable` to `Xephyr`, so the sandbox window can be resized. With [xdotool(1)](https://github.com/jordansissel/xdotool) installed, the largest application window is kept matched to the sandbox display: while a Firefox-based browser starts and whenever the display changes. Without it, only the display resizes; see [Troubleshooting](#troubleshooting).
+* `-s widthxheight`: sandbox display resolution in pixels, e.g. `1280x1024`. Default: `1024x768`, reduced to the host screen's work area when that is smaller, except for [`tor-browser`](#application-defaults).
+* `-u user`: sandbox user to run the command as. Default: `fsunaba`. The user must exist and must not be a member of `wheel` or `operator`, because such a user could escalate from inside the sandbox.
 * `-v`: show verbose output.
 * `-w`: run a window manager inside the sandbox, before the application. Default manager: `cwm`, change it with `FSUNABA_WM`. Needed for applications whose popup menus expect a window manager to handle the input focus, such as Tor Browser; see [Troubleshooting](#troubleshooting).
 
@@ -129,9 +139,9 @@ Each `Fsunaba` invocation gets its own X display: `Fsunaba` picks the lowest dis
 | --- | --- | --- |
 | `chrome`, `chromium`, `ungoogled-chromium` | `-window-size=W,H --window-position=0,0` | default |
 | `firefox` | `-width W -height H` | default |
-| `tor-browser` | `-width W -height H` | `1000x1000` unless `-s` or `WIDTH`/`HEIGHT` is given |
+| `tor-browser` | `-width W -height H` | `1000x1000` unless `-s` or `WIDTH`/`HEIGHT` is given, capped to the host screen |
 
-The `tor-browser` default is chosen to match Tor Browser's own default 1000x1000 window and its 200x100 letterboxing steps, so the browser keeps its usual fingerprint. Use `-s` to override it.
+The `tor-browser` default keeps the screen size Tor Browser expects. Tor Browser ignores `-width` and `-height` under its fingerprinting protection, sizes its window from the screen and rounds its content to 200x100 steps, so the sandbox display decides how much room it takes. Use `-s` to override it.
 
 ### ADVANCED USAGE
 
@@ -145,11 +155,11 @@ The following environment variables may be set to override `Fsunaba`'s default b
 * `WIDTH`: Set a custom `Xephyr` display width in pixels. Overridden by `-s`. Default: `1024`.
 * `HEIGHT`: Set a custom `Xephyr` display height in pixels. Overridden by `-s`. Default: `768`.
 * `FSUNABA_TIMEOUT`: Seconds to wait for `Xephyr` to become ready. Default: `10`.
-* `FSUNABA_XEPHYR_OPTS`: Additional options to pass to `Xephyr`. The `-r` and `-G` options append to this value.
+* `FSUNABA_XEPHYR_OPTS`: Additional options to pass to `Xephyr`. The `-r` and `-G` options append to this value. `-ac`, `-auth`, `-nolock`, `-listen` and `+iglx` are refused, because each would weaken the sandbox display.
 
 #### Amnesic Mode
 
-The `-A` option runs the application as a separate amnesic user and empties that user's home directory before and after the session, so each session starts with an empty home and leaves nothing behind.
+The `-A` option runs the application as a separate amnesic user and empties that user's home directory before and after the session, so each session starts with nothing but its own session authority file and leaves nothing behind.
 
 Create the amnesic user once (default name `fsunaba-amnesic`):
 
@@ -167,7 +177,7 @@ Use `FSUNABA_AMNESIC_USER` or `make install-amnesic-user FSUNABA_AMNESIC_USER=<u
 
 `Fsunaba` erases everything inside the amnesic home, including hidden files and files the application made read-only, and reports an error if anything survives. The home directory itself is kept, because it is owned by the amnesic user and only `root` could remove the directory entry from `/home`.
 
-*IMPORTANT:* Amnesic mode only erases the amnesic user's home directory. Data written elsewhere (e.g. `/tmp`) and the sandbox's full network access are unaffected. `Fsunaba` refuses to run amnesic mode as root, against your own account, against `root`, or when the amnesic home is not under `/home`.
+*IMPORTANT:* Amnesic mode only erases the amnesic user's home directory. Data written elsewhere (e.g. `/tmp`) and the sandbox's full network access are unaffected. `Fsunaba` runs only as an unprivileged user, and amnesic mode in addition refuses to run as you or with your user identifier, as `root`, on a home that is a symbolic link, on a home that is not owned by the amnesic user, on a home outside `/home`, or on a home that resolves to your own home directory. Nothing is erased when it refuses.
 
 #### Alternate and/or Multiple Sandbox Users
 
@@ -203,7 +213,7 @@ doas -u <sandbox_user> xclip -display :N -selection clipboard -out | xclip -sele
 
 #### Shared Files
 
-If you want to share some files beween your user and the `fsunaba` user, it is suggested that you create a directory owned by the `fsunaba` user and grant group access to it to your user's group (generally the same as your user's name). It is best to only move specific files into and out of this shared directory as needed, not permanently store data in it, as any X application run using `Fsunaba` will have access to it.
+If you want to share some files between your user and the `fsunaba` user, it is suggested that you create a directory owned by the `fsunaba` user and grant group access to it to your user's group (generally the same as your user's name). It is best to only move specific files into and out of this shared directory as needed, not permanently store data in it, as any X application run using `Fsunaba` will have access to it.
 
 *IMPORTANT:* This will weaken the security of your sandbox!
 
@@ -229,7 +239,7 @@ If audio is failing to play from applications within the Flysunaba sandbox, firs
 1. You have played _any_ audio as your primary user, which will have created the sndio(7) cookie
 2. You have copied, _not_ symlinked, your user's `~/.sndio/cookie` to the Flysunaba user
 3. The Flysunaba user's `~/.sndio/cookie` is owned by the correct user (e.g. `fsunaba:fsunaba`) and _only_ the owner has read & write permissions (i.e. `600`)
-4. That there contents of your user's and the Flysunaba user's `~/.sndio/cookie` files are identical
+4. That the contents of your user's and the Flysunaba user's `~/.sndio/cookie` files are identical
 
 ## TROUBLESHOOTING
 
@@ -237,18 +247,19 @@ If audio is failing to play from applications within the Flysunaba sandbox, firs
 * `Crash Annotation GraphicsCriticalError: |[0][GFX1-]: RenderCompositorSWGL failed mapping default framebuffer, no dt`: harmless warning from Firefox-based browsers (including Tor Browser) using the software compositor, which is always the case in the sandbox because there is no hardware acceleration. It appears while a window or popup is unmapped, for example when closing the browser, and does not affect it. Newer Firefox releases no longer print it.
 * Amnesic mode reports that the home is not empty after erasing: something is still writing to the amnesic home, usually an application that outlived its launcher. Close it and run `Fsunaba -A` again.
 * Tor Browser or Firefox menus (the hamburger menu, bookmarks, the security panel) close as soon as the mouse reaches them, and the cursor turns into a large X: by default the sandbox runs no window manager, so the X server moves the input focus with the pointer and the application closes its own popup when the popup takes that focus. Run `Fsunaba -w tor-browser` to put a window manager in the sandbox, which handles the focus and keeps those popups open. The X cursor is the server's default root cursor; `Fsunaba` sets the usual arrow, but that alone does not keep a popup open.
-* Resizing the sandbox window with `-r` resizes the sandbox display, but `Xephyr` cannot resize application windows, so on its own the application keeps its size. With `xdotool` installed, `Fsunaba` checks the display size once per second and resizes the largest application window to fill the new display, so it keeps using the whole sandbox with or without a window manager. Without `xdotool`, a window follows only if the window manager re-tiles or re-maximizes its clients on a screen change; the default `cwm` does not, and the base managers that do (`twm`, `fvwm`) make Firefox-based browsers, including Tor Browser, use the popup pointer grab that breaks their menus, so use a re-tiling manager (`FSUNABA_WM=i3 Fsunaba -r -w <app>`) or start at the wanted size with `-s`.
+* Resizing the sandbox window with `-r` resizes the sandbox display, but `Xephyr` cannot resize application windows, so on its own the application keeps its size. With `xdotool` installed, `Fsunaba` resizes the largest application window to the display while a Firefox-based browser starts and whenever the display changes. Without `xdotool`, a window follows only if the window manager resizes its clients on a screen change; the default `cwm` does not, so use a manager that does (set `FSUNABA_WM`) or start at the wanted size with `-s`.
+* Tor Browser leaves a strip of the sandbox background below its window: its fingerprinting protection sizes the window from the screen, ignores `-width` and `-height`, and always leaves room for window decorations that `cwm` does not draw. With `xdotool` installed `Fsunaba` enlarges the window to fill the display; without it, run a window manager that draws a title bar (`FSUNABA_WM=fvwm Fsunaba -w tor-browser`), which uses that reserved room and looks better. `fvwm` switches workspace when the pointer reaches a screen edge; add `EdgeScroll 0 0` to its configuration to disable that.
 
 ## SECURITY
 
 `Fsunaba` is not a strong isolation boundary. Keep the following in mind:
 
 * The sandbox user can read any file on the system that its permissions allow, and it has full network access. Do not run untrusted applications and assume your data is safe.
-* `Fsunaba` stores its X authority file in a private, mode `700` temporary directory, and removes it, along with all authentication cookies, when the application exits or the utility is interrupted.
+* `Fsunaba` stores its X authority file in a private, mode `700` temporary directory, and removes it, along with all authentication cookies, when the application exits or the utility is interrupted. The sandbox cookie is kept per session in `~fsunaba/.fsunaba/Xauthority.N`, mode `600`, never in the sandbox user's shared `~/.Xauthority`.
 * The authentication cookie is fed to `xauth` through a pipe instead of the command line, because process arguments are readable by every local user on OpenBSD.
-* The sandboxed application runs with a minimal environment (`DISPLAY`, `HOME`, `LOGNAME`, `USER`, `PATH`), with its home directory as the working directory, and with its arguments unchanged.
+* The sandboxed application runs with a minimal environment (`DISPLAY`, `HOME`, `LOGNAME`, `USER`, `XAUTHORITY`, `PATH`), with its home directory as the working directory, with its arguments unchanged, and with `umask 077`, so the files it creates are private.
 * The optional `xdotool` helper that makes the largest window follow `-r` runs inside the sandbox as the sandbox user, like the application, and talks only to the sandbox display; it cannot reach your X session.
-* `make install` validates the sandbox username and `/etc/doas.conf` before changing them, refuses to modify an invalid `doas.conf`, and makes the sandbox user's home directory non-writable by group and others.
+* `make install` validates the sandbox username and `/etc/doas.conf`, edits the `doas.conf` rules idempotently through a renamed copy, so an interrupted run cannot leave a partial rule behind, and makes the sandbox user's home directory non-writable by group and others.
 * Amnesic mode erases the contents of the amnesic home but cannot remove the home directory itself, and never touches data outside it.
 
 ### What a Malicious Application Can Still Do
@@ -258,7 +269,7 @@ If audio is failing to play from applications within the Flysunaba sandbox, firs
 * **Read whatever the sandbox user can read**, including world-readable files in your home, everything under `/etc` and `/tmp`, and its own home directory. A mode `700` home keeps your files out of reach.
 * **Write to its home and `/tmp`**, so it can plant files for you to open later, and fill your disk.
 * **Reach the network**, including your LAN and services listening on `localhost`, and exfiltrate anything it read.
-* **Read the sandbox user's `~/.Xauthority`**, which also reaches any other sandbox display belonging to the same sandbox user, such as a concurrent session. Each session runs on its own display, so an application cannot see another session's windows at the X level, but two sessions that share a sandbox user also share that user, its home, and its `~/.Xauthority`. Give each concurrent session a different `-u` sandbox user when they must not reach each other; amnesic mode shares one home and is meant for one session at a time.
+* **Read another session's cookie file.** Sessions that share a sandbox user also share that user, its home directory and its user identifier, so one can read another session's cookie file and reach its display. Give each concurrent session a different `-u` sandbox user when they must not reach each other; amnesic mode shares one home and is meant for one session at a time.
 * **Attack `Xephyr` and the X server**, which parse the application's X protocol traffic while running with *your* privileges; a memory-safety bug there is a way out of the sandbox. OpenBSD's `pledge(2)`/`unveil(2)` reduce that surface but do not remove it.
 * **Grab the host keyboard** while the sandbox window holds the keyboard grab, and read the sandbox clipboard. `-G` prevents the grab.
 * **Exhaust resources** with processes, memory, or disk, and leave processes running after the launcher exits.
