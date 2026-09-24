@@ -29,11 +29,14 @@ check-user:
 		| grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$$' \
 		|| { echo "make: invalid USER '${USER}'" >&2; exit 1; }
 
+# install to a temporary name and rename, so a failure cannot leave a
+# truncated script or manual page behind
 install: ${BIN}/${PROG} ${MAN}/${PROG}.${SECTION} install-user install-doas
-	mkdir -p ${BINDIR}
-	install -m755 ${BIN}/${PROG} ${BINDIR}
-	mkdir -p ${MANDIR}
-	install -m444 ${MAN}/${PROG}.${SECTION} ${MANDIR}
+	@mkdir -p ${BINDIR} ${MANDIR}
+	@install -m755 ${BIN}/${PROG} ${BINDIR}/.${PROG}.new \
+		&& mv ${BINDIR}/.${PROG}.new ${BINDIR}/${PROG}
+	@install -m444 ${MAN}/${PROG}.${SECTION} ${MANDIR}/.${PROG}.${SECTION}.new \
+		&& mv ${MANDIR}/.${PROG}.${SECTION}.new ${MANDIR}/${PROG}.${SECTION}
 	@if [ -x /usr/sbin/makewhatis ]; then \
 		echo "make: updating the manual page index"; \
 		/usr/sbin/makewhatis ${PREFIX}/man; \
@@ -55,27 +58,35 @@ install-amnesic-user: check-amnesic-user
 		echo "make: warning: '${FSUNABA_AMNESIC_USER}' is a member of a privileged group" >&2; \
 	fi
 
+# Edit a copy of /etc/doas.conf and rename it into place, so an interrupted
+# make never leaves a partial rule behind: doas refuses an invalid file, which
+# would lock the administrator out of doas. Rules are matched as fixed strings
+# on whole lines, because a username may contain a dot. Both rules are added or
+# removed only when absent or present, so the target is idempotent.
 install-doas: check-fsunaba-user check-amnesic-user check-user
-	@test -f /etc/doas.conf \
-		|| { echo "make: creating /etc/doas.conf" >&2; \
-		     touch /etc/doas.conf; \
-		     chown root:wheel /etc/doas.conf; \
-		     chmod 600 /etc/doas.conf; }
-	@doas -C /etc/doas.conf >/dev/null 2>&1 \
-		|| { echo "make: /etc/doas.conf is invalid; not modified" >&2; exit 1; }
-	@if [ -s /etc/doas.conf ] && [ -n "$$(tail -c 1 /etc/doas.conf)" ]; then \
-		echo >> /etc/doas.conf; \
-	fi
-	@for line in "${DOAS_LINE}" "${DOAS_AMNESIC_LINE}"; do \
-		if grep -qE "^$$line$$" /etc/doas.conf; then \
+	@conf="/etc/doas.conf"; tmp="$$(mktemp /etc/doas.conf.XXXXXXXX)" || exit 1; \
+	trap 'rm -f "$$tmp" "$$tmp.new"' EXIT; \
+	if [ -f "$$conf" ]; then cp "$$conf" "$$tmp"; \
+	else echo "make: creating $$conf" >&2; : > "$$tmp"; fi; \
+	chown root:wheel "$$tmp" && chmod 600 "$$tmp" || exit 1; \
+	doas -C "$$tmp" >/dev/null 2>&1 \
+		|| { echo "make: $$conf is invalid; not modified" >&2; exit 1; }; \
+	if [ -s "$$tmp" ] && [ -n "$$(tail -c 1 "$$tmp")" ]; then echo >> "$$tmp"; fi; \
+	for line in "${DOAS_LINE}" "${DOAS_AMNESIC_LINE}"; do \
+		if grep -Fqx "$$line" "$$tmp"; then \
 			echo "make: '$$line' is already present"; \
 		else \
-			echo "make: adding '$$line' to /etc/doas.conf"; \
-			echo "$$line" >> /etc/doas.conf; \
+			echo "make: adding '$$line'"; \
+			echo "$$line" >> "$$tmp"; \
 		fi; \
-	done
+	done; \
+	doas -C "$$tmp" >/dev/null 2>&1 \
+		|| { echo "make: resulting $$conf is invalid; not modified" >&2; exit 1; }; \
+	mv "$$tmp" "$$conf" && echo "make: updated $$conf"
 
 install-sndio-cookie: check-fsunaba-user check-user
+	@id ${FSUNABA_USER} >/dev/null 2>&1 \
+		|| { echo "make: sandbox user '${FSUNABA_USER}' does not exist" >&2; exit 1; }
 	@test -f ~${USER}/.sndio/cookie \
 		|| { echo "make: ~${USER}/.sndio/cookie not found; play audio first" >&2; exit 1; }
 	@echo "Copying sndio cookie from '${USER}' to '${FSUNABA_USER}'..."
@@ -99,10 +110,24 @@ uninstall-amnesic-user: check-amnesic-user
 		&& rmuser ${FSUNABA_AMNESIC_USER} || true
 
 uninstall-doas: check-fsunaba-user check-amnesic-user check-user
-	@if [ -f /etc/doas.conf ]; then \
-		sed -i "/^${DOAS_LINE}$$/d" /etc/doas.conf; \
-		sed -i "/^${DOAS_AMNESIC_LINE}$$/d" /etc/doas.conf; \
-	fi
+	@conf="/etc/doas.conf"; \
+	if [ ! -f "$$conf" ]; then echo "make: $$conf not found"; exit 0; fi; \
+	tmp="$$(mktemp /etc/doas.conf.XXXXXXXX)" || exit 1; \
+	trap 'rm -f "$$tmp" "$$tmp.new"' EXIT; \
+	cp "$$conf" "$$tmp"; \
+	chown root:wheel "$$tmp" && chmod 600 "$$tmp" || exit 1; \
+	for line in "${DOAS_LINE}" "${DOAS_AMNESIC_LINE}"; do \
+		if grep -Fqx "$$line" "$$tmp"; then \
+			echo "make: removing '$$line'"; \
+			awk -v l="$$line" '$$0 != l' "$$tmp" > "$$tmp.new" || exit 1; \
+			mv "$$tmp.new" "$$tmp"; \
+		else \
+			echo "make: '$$line' is not present"; \
+		fi; \
+	done; \
+	doas -C "$$tmp" >/dev/null 2>&1 \
+		|| { echo "make: resulting $$conf is invalid; not modified" >&2; exit 1; }; \
+	mv "$$tmp" "$$conf" && echo "make: updated $$conf"
 
 uninstall-sndio-cookie: check-fsunaba-user
 	rm -f ~${FSUNABA_USER}/.sndio/cookie
