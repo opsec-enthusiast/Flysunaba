@@ -66,13 +66,20 @@ _XEPHYR_PID=""
 _XEPHYR_LOG=""
 _TMPDIR=""
 _XAUTH=""
+_SANDBOX_XAUTH_DIR=""
+_SANDBOX_XAUTH=""
 _DISPLAY=""
 _DISPLAY_NUM=""
 _SANDBOX_HOME=""
+_INVOKING_HOME=""
 _HOST_AUTH=no
 _SANDBOX_AUTH=no
 _AMNESIC=no
+_AMNESIC_WIPE=no
 _WM=""
+_XDOOL=""
+_FIT=0
+_FOLLOW=no
 
 # print an error to stderr and exit
 _fatal() {
@@ -106,21 +113,34 @@ _require_positive_int() {
   [[ "$2" -gt 0 ]] || _fatal "invalid $1 '$2'" 2
 }
 
-# refuse to erase anything that is not a dedicated, non-privileged home
+# print the physical path of a directory, so two spellings of the same
+# directory compare equal; the path itself when it cannot be resolved
+_real_path() {
+  realpath "$1" 2>/dev/null || print "$1"
+}
+
+# refuse to erase anything that is not a dedicated, non-privileged home: the
+# path must be a real directory owned by the sandbox user and must not resolve
+# to the invoking user's own home, or the wipe would follow a link or a replaced
+# path and erase something else. The link is tested before the location, so a
+# linked home is refused wherever it points.
 _amnesic_guard() {
-  [[ "$(id -u)" -ne 0 ]] \
-    || _fatal "refusing to run amnesic mode as root"
   [[ "$FSUNABA_USER" != "$(id -un)" ]] \
+    || _fatal "refusing to erase the invoking user's home directory"
+  [[ "$(id -u "$FSUNABA_USER")" != "$(id -u)" ]] \
     || _fatal "refusing to erase the invoking user's home directory"
   [[ "$FSUNABA_USER" != root ]] \
     || _fatal "refusing to erase root's home directory"
+  [[ ! -L "$_SANDBOX_HOME" ]] \
+    || _fatal "amnesic home '${_SANDBOX_HOME}' is a symbolic link"
   case "$_SANDBOX_HOME" in
     /home/*) ;;
     *) _fatal "amnesic home '${_SANDBOX_HOME}' is not under /home" ;;
   esac
-  if id -Gn "$FSUNABA_USER" | grep -qwE 'wheel|operator'; then
-    _fatal "amnesic user '${FSUNABA_USER}' is in a privileged group"
-  fi
+  [[ "$(_real_path "$_SANDBOX_HOME")" != "$(_real_path "$_INVOKING_HOME")" ]] \
+    || _fatal "amnesic home '${_SANDBOX_HOME}' is the invoking user's home directory"
+  [[ "$(stat -f %Su "$_SANDBOX_HOME")" == "$FSUNABA_USER" ]] \
+    || _fatal "amnesic home '${_SANDBOX_HOME}' is not owned by '${FSUNABA_USER}'"
   return 0
 }
 
@@ -158,6 +178,23 @@ _free_display() {
   return 1
 }
 
+# print the host display's usable size in pixels as "width height", taken from
+# the window manager's work area when it publishes one and from the display
+# otherwise; used to keep the default sandbox size inside the screen
+_host_area() {
+  local area=""
+  area="$(DISPLAY="$FSUNABA_HOST_DISPLAY" xprop -root -notype _NET_WORKAREA \
+    2>/dev/null | sed -n 's/.*= *//p' | cut -d, -f3,4 | tr -d ' ' | tr ',' ' ')"
+  case "$area" in
+    [0-9]*' '[0-9]*) print "$area"; return 0 ;;
+  esac
+  area="$(DISPLAY="$FSUNABA_HOST_DISPLAY" xdpyinfo 2>/dev/null \
+    | sed -n 's/.*dimensions: *\([0-9]*\)x\([0-9]*\).*/\1 \2/p')"
+  case "$area" in
+    [0-9]*' '[0-9]*) print "$area" ;;
+  esac
+}
+
 # erase every entry inside the sandbox home directory, then report leftovers
 #
 # Runs in the home directory first, because a process that cannot read its
@@ -167,7 +204,17 @@ _free_display() {
 _wipe_home() {
   local flag="${1:-}"
   local output=""
+  # a wipe needs an accepted guard, which is what sets _AMNESIC_WIPE, and a home
+  # that is not the invoking user's own, whatever the caller did
+  [[ "$_AMNESIC_WIPE" == yes ]] || {
+    print -u2 -r -- "${_tool}: refusing to wipe an unauthorized home"
+    return 1
+  }
   [[ -n "$_SANDBOX_HOME" && -d "$_SANDBOX_HOME" ]] || return 0
+  [[ "$(_real_path "$_SANDBOX_HOME")" != "$(_real_path "$_INVOKING_HOME")" ]] || {
+    print -u2 -r -- "${_tool}: refusing to erase the invoking user's home directory"
+    return 1
+  }
   output="$(doas $flag -u "$FSUNABA_USER" /bin/sh -c '
       cd "$1" || exit 1
       chmod -R u+rwX "$1" 2>/dev/null
@@ -199,12 +246,21 @@ _cleanup() {
   fi
   if [[ "$_SANDBOX_AUTH" == yes ]]; then
     doas -n -u "$FSUNABA_USER" env HOME="$_SANDBOX_HOME" \
-      xauth remove "$_DISPLAY" 2>/dev/null
+      XAUTHORITY="$_SANDBOX_XAUTH" xauth remove "$_DISPLAY" 2>/dev/null
     _SANDBOX_AUTH=no
   fi
-  if [[ "$_AMNESIC" == yes ]]; then
+  # the session authority file is only as valuable as the cookie it holds, but
+  # it lives in the sandbox user's home, so remove it rather than leave a file
+  # that outlives the session
+  if [[ -n "$_SANDBOX_XAUTH" ]]; then
+    doas -n -u "$FSUNABA_USER" /bin/rm -f "$_SANDBOX_XAUTH" 2>/dev/null
+    _SANDBOX_XAUTH=""
+  fi
+  # only wipe a home the guard accepted: when the guard refuses, the session
+  # never started, and erasing the very home it refused would defeat the guard
+  if [[ "$_AMNESIC_WIPE" == yes ]]; then
     _wipe_home -n
-    _AMNESIC=no
+    _AMNESIC_WIPE=no
   fi
   if [[ -n "$_TMPDIR" ]]; then
     rm -rf "$_TMPDIR"
@@ -254,6 +310,13 @@ if ! id -u "$FSUNABA_USER" >/dev/null 2>&1; then
   fi
   _fatal "sandbox user '${FSUNABA_USER}' does not exist"
 fi
+# a privileged sandbox user could escalate from inside the sandbox, so refuse
+# it, and never run the outer session as root
+[[ "$(id -u)" -ne 0 ]] \
+  || _fatal "refusing to run as root, the sandbox must stay unprivileged"
+if id -Gn "$FSUNABA_USER" | grep -qwE 'wheel|operator'; then
+  _fatal "sandbox user '${FSUNABA_USER}' must not be in wheel or operator"
+fi
 _require_positive_int width "$WIDTH"
 _require_positive_int height "$HEIGHT"
 _require_positive_int timeout "$FSUNABA_TIMEOUT"
@@ -262,23 +325,40 @@ if [[ -n "$_WM" ]]; then
     || _fatal "window manager '${_WM%% *}' not found"
 fi
 
-# make application windows follow a resizeable sandbox display when the optional
-# xdotool is available; without it, -r only resizes the display itself. The path
-# is fixed, not taken from PATH, because it is executed in the sandbox.
-case " ${FSUNABA_XEPHYR_OPTS} " in
-  *" -resizeable "*)
-    _XDOOL=""
-    for _xd in /usr/local/bin/xdotool /usr/bin/xdotool /usr/X11R6/bin/xdotool; do
-      if [[ -x "$_xd" ]]; then
-        _XDOOL="$_xd"
-        break
-      fi
-    done
-    if [[ -z "$_XDOOL" && "$VERBOSE" == true ]]; then
-      print "${_tool}: xdotool not found; the application will not follow resizes."
-    fi
-    ;;
+# refuse Xephyr options that would weaken the sandbox: -ac and -auth hand
+# access control away, -nolock removes the display lock that keeps two sessions
+# apart, -listen exposes the display on the network, and +iglx enables the
+# indirect GLX path
+for _opt in ${FSUNABA_XEPHYR_OPTS}; do
+  case "$_opt" in
+    -ac | -auth | -nolock | -listen | +iglx)
+      _fatal "refusing Xephyr option '${_opt}' in FSUNABA_XEPHYR_OPTS" 2
+      ;;
+  esac
+done
+
+# keep application windows matched to the sandbox display when the optional
+# xdotool is available: Firefox sizes its window from the screen, so a browser
+# can start short of the display or larger than it, and -r needs windows resized
+# when the display changes. The path is fixed, not taken from PATH, because it
+# is executed in the sandbox.
+case "${1##*/}" in
+  chrome | chromium | ungoogled-chromium | firefox | tor-browser) _FIT=20 ;;
 esac
+case " ${FSUNABA_XEPHYR_OPTS} " in
+  *" -resizeable "*) _FOLLOW=yes ;;
+esac
+if [[ "$_FIT" -gt 0 || "$_FOLLOW" == yes ]]; then
+  for _xd in /usr/local/bin/xdotool /usr/bin/xdotool /usr/X11R6/bin/xdotool; do
+    if [[ -x "$_xd" ]]; then
+      _XDOOL="$_xd"
+      break
+    fi
+  done
+  if [[ -z "$_XDOOL" && "$VERBOSE" == true ]]; then
+    print "${_tool}: xdotool not found; window sizing will not be adjusted."
+  fi
+fi
 
 # create private runtime state and clean it up on any exit or signal
 umask 077
@@ -301,13 +381,47 @@ _SANDBOX_HOME="$(getent passwd "$FSUNABA_USER" | cut -d: -f6)"
 
 # erase any leftovers from a previous amnesic session
 if [[ "$_AMNESIC" == yes ]]; then
+  # resolve the invoking user's own home directory, which a wipe must never
+  # touch; refuse when it cannot be determined
+  _INVOKING_HOME="$(getent passwd "$(id -un)" | cut -d: -f6)"
+  [[ -n "$_INVOKING_HOME" ]] || _INVOKING_HOME="${HOME:-}"
+  [[ -n "$_INVOKING_HOME" ]] \
+    || _fatal "could not determine the invoking user's home directory"
   _amnesic_guard
+  _AMNESIC_WIPE=yes
   [[ "$VERBOSE" == true ]] && print "Wiping amnesic home '${_SANDBOX_HOME}'..."
   _wipe_home || _fatal "could not erase the amnesic home directory"
 fi
 
-# append window geometry options for known applications, and let applications
-# with strict default window sizes pick their own sandbox display resolution
+# let applications with strict default window sizes choose a sandbox display,
+# then keep the default inside the host screen so the sandbox window fits; an
+# explicit size with -s or WIDTH/HEIGHT is always used as given
+case "${1##*/}" in
+  tor-browser)
+    # Tor Browser's anti-fingerprinting rounds its content to multiples of
+    # 200x100 and sizes the window from the screen, so the display size decides
+    # how much room it takes; 1000x1000 is the size it expects
+    if [[ "$_SIZE_SET" == no ]]; then
+      WIDTH=1000
+      HEIGHT=1000
+    fi
+    ;;
+esac
+if [[ "$_SIZE_SET" == no ]]; then
+  _area="$(_host_area)"
+  _aw="${_area%% *}"
+  _ah="${_area##* }"
+  case "$_aw" in
+    '' | *[!0-9]*) ;;
+    *) [[ "$_aw" -lt "$WIDTH" ]] && WIDTH="$_aw" ;;
+  esac
+  case "$_ah" in
+    '' | *[!0-9]*) ;;
+    *) [[ "$_ah" -lt "$HEIGHT" ]] && HEIGHT="$_ah" ;;
+  esac
+fi
+
+# append window geometry options for known applications
 case "${1##*/}" in
   chrome | chromium | ungoogled-chromium)
     set -- "$@" -window-size="${WIDTH},${HEIGHT}" --window-position=0,0
@@ -316,13 +430,6 @@ case "${1##*/}" in
     set -- "$@" -width "$WIDTH" -height "$HEIGHT"
     ;;
   tor-browser)
-    # Tor Browser opens a 1000x1000 window by default and letterboxes its
-    # content to multiples of 200x100, so a 1000x1000 display keeps that
-    # default window size and does not change the browser fingerprint
-    if [[ "$_SIZE_SET" == no ]]; then
-      WIDTH=1000
-      HEIGHT=1000
-    fi
     set -- "$@" -width "$WIDTH" -height "$HEIGHT"
     ;;
 esac
@@ -382,11 +489,25 @@ while :; do
   fi
 done
 
-# store the authentication cookie for the sandbox user, feeding it through a
-# pipe because process arguments are readable by every local user
+# store the authentication cookie for the sandbox user in an authority file of
+# this session, inside its home but never the shared ~/.Xauthority: that file
+# outlives the session, so every session of the same sandbox user could read the
+# cookie of a session it does not own. The file is created private and truncated
+# first, so a stale file from a killed session cannot carry a live cookie. The
+# cookie is still fed through a pipe, because process arguments are readable by
+# every local user.
 [[ "$VERBOSE" == true ]] && print "Sandbox display is '${_DISPLAY}'."
+_SANDBOX_XAUTH_DIR="${_SANDBOX_HOME}/.fsunaba"
+_SANDBOX_XAUTH="${_SANDBOX_XAUTH_DIR}/Xauthority.${_DISPLAY_NUM}"
+_xa_out="$(doas -u "$FSUNABA_USER" /bin/sh -c '
+    umask 077
+    mkdir -p "$1" && chmod 700 "$1" || exit 1
+    : > "$2" && chmod 600 "$2" || exit 1
+  ' _ "$_SANDBOX_XAUTH_DIR" "$_SANDBOX_XAUTH" 2>&1)" \
+  || _fatal "could not create the session authority file: ${_xa_out}"
 _xa_out="$(printf 'add %s . %s\n' "$_DISPLAY" "$_MCOOKIE" \
-  | doas -u "$FSUNABA_USER" env HOME="$_SANDBOX_HOME" xauth source - 2>&1)" \
+  | doas -u "$FSUNABA_USER" env HOME="$_SANDBOX_HOME" \
+    XAUTHORITY="$_SANDBOX_XAUTH" xauth source - 2>&1)" \
   || _fatal "could not store the sandbox authentication cookie: ${_xa_out}"
 _SANDBOX_AUTH=yes
 
@@ -403,45 +524,89 @@ _SANDBOX_AUTH=yes
 [[ "$VERBOSE" == true ]] \
   && print "Launching '${1##*/}' as '${FSUNABA_USER}' on '${_DISPLAY}'..."
 doas -u "$FSUNABA_USER" /bin/sh -c '
-  home="$1"; display="$2"; wm="$3"; xtool="$4"
-  shift 4
+  home="$1"; display="$2"; wm="$3"; xtool="$4"; settle="$5"; follow="$6"; xauth="$7"
+  shift 7
   PATH="/usr/bin:/bin:/usr/X11R6/bin:/usr/local/bin"
   export PATH
+  # use the authority file of this session, not the shared ~/.Xauthority
+  XAUTHORITY="$xauth"
+  export XAUTHORITY
+  # everything the application creates stays private to the sandbox user
+  umask 077
   cd "$home" || exit 1
-  # resize the largest visible window to the new display size; a window that
-  # filled the display is the largest one, and this also covers a session
-  # without a window manager, where nothing can maximize a window
+  # keep the largest visible window matched to the sandbox display: a browser
+  # sizes its window from the screen, so it can start short of the display or
+  # larger than it, and -r needs the window resized when the display changes.
+  # Run for settle seconds after the window appears, and after each change.
   _follow_resize() {
-    _robot="$1"; _dpy="$2"; _old=""
+    _robot="$1"; _dpy="$2"; _settle="$3"; _follow="$4"; _old=""; _fails=0; _age=0
     while :; do
-      _new="$(DISPLAY="$_dpy" "$_robot" getdisplaygeometry 2>/dev/null)" || exit 0
+      _new="$(DISPLAY="$_dpy" xwininfo -root 2>/dev/null \
+        | grep -E "Width:|Height:" | tr -cd "0-9\n" | tr "\n" " ")"
+      if [ -z "$_new" ]; then
+        # the display can be briefly busy while Xephyr resizes it; only give up
+        # after several failures in a row, so the follower survives a resize
+        _fails=$(( _fails + 1 ))
+        [ "$_fails" -lt 5 ] || exit 0
+        sleep 1
+        continue
+      fi
+      _fails=0
       set -- $_new
       [ "$#" -eq 2 ] || { _old=""; sleep 1; continue; }
       case "$1$2" in
         *[!0-9]*) _old=""; sleep 1; continue ;;
       esac
-      _nw="$1"; _nh="$2"
-      if [ -n "$_old" ]; then
-        _best=""; _bestarea=0
-        for _win in $(DISPLAY="$_dpy" "$_robot" search --onlyvisible . 2>/dev/null); do
-          _geom="$(DISPLAY="$_dpy" "$_robot" getwindowgeometry --shell "$_win" 2>/dev/null)"
-          _gw="$(printf "%s\n" "$_geom" | sed -n "s/^WIDTH=//p")"
-          _gh="$(printf "%s\n" "$_geom" | sed -n "s/^HEIGHT=//p")"
-          [ -n "$_gw" ] || continue
-          [ -n "$_gh" ] || continue
-          case "$_gw" in *[!0-9]*) continue ;; esac
-          case "$_gh" in *[!0-9]*) continue ;; esac
-          _area=$(( _gw * _gh ))
-          if [ "$_area" -gt "$_bestarea" ]; then
-            _bestarea="$_area"
-            _best="$_win"
-          fi
-        done
-        if [ -n "$_best" ]; then
-          DISPLAY="$_dpy" "$_robot" windowsize "$_best" 100% 100% 2>/dev/null
+      _dw="$1"; _dh="$2"
+      _best=""; _bestarea=0; _bw=0; _bh=0; _bx=0; _by=0
+      for _win in $(DISPLAY="$_dpy" "$_robot" search --onlyvisible . 2>/dev/null); do
+        _geom="$(DISPLAY="$_dpy" "$_robot" getwindowgeometry --shell "$_win" 2>/dev/null)"
+        _gw="$(printf "%s\n" "$_geom" | sed -n "s/^WIDTH=//p")"
+        _gh="$(printf "%s\n" "$_geom" | sed -n "s/^HEIGHT=//p")"
+        _gx="$(printf "%s\n" "$_geom" | sed -n "s/^X=//p")"
+        _gy="$(printf "%s\n" "$_geom" | sed -n "s/^Y=//p")"
+        [ -n "$_gw" ] || continue
+        [ -n "$_gh" ] || continue
+        case "$_gw" in *[!0-9]*) continue ;; esac
+        case "$_gh" in *[!0-9]*) continue ;; esac
+        [ -n "$_gx" ] || _gx=0
+        [ -n "$_gy" ] || _gy=0
+        case "$_gx" in *[!0-9-]*) _gx=0 ;; esac
+        case "$_gy" in *[!0-9-]*) _gy=0 ;; esac
+        _area=$(( _gw * _gh ))
+        if [ "$_area" -gt "$_bestarea" ]; then
+          _bestarea="$_area"
+          _best="$_win"
+          _bw="$_gw"
+          _bh="$_gh"
+          _bx="$_gx"
+          _by="$_gy"
+        fi
+      done
+      _fit=no
+      if [ -n "$_old" ] && [ "$_old" != "$_new" ]; then
+        _fit=yes
+      elif [ -n "$_best" ] && [ "$_settle" -gt 0 ]; then
+        _fit=yes
+        _settle=$(( _settle - 1 ))
+      fi
+      if [ "$_fit" = yes ] && [ -n "$_best" ]; then
+        if [ "$_bw" -lt $(( _dw - 4 )) ] || [ "$_bw" -gt $(( _dw + 4 )) ] \
+          || [ "$_bh" -lt $(( _dh - 4 )) ] || [ "$_bh" -gt $(( _dh + 4 )) ] \
+          || [ "$_bx" != 0 ] || [ "$_by" != 0 ]; then
+          DISPLAY="$_dpy" "$_robot" windowsize "$_best" 100% 100% \
+            windowmove "$_best" 0 0 2>/dev/null
         fi
       fi
-      _old="$_nw $_nh"
+      _old="$_new"
+      _age=$(( _age + 1 ))
+      # without -r the display cannot change, so this helper is only needed
+      # while a browser starts; do not leave it polling for the whole session
+      if [ "$_follow" != yes ]; then
+        if [ "$_settle" -le 0 ] || [ "$_age" -ge 60 ]; then
+          exit 0
+        fi
+      fi
       sleep 1
     done
   }
@@ -449,17 +614,19 @@ doas -u "$FSUNABA_USER" /bin/sh -c '
     DISPLAY="$display" $wm >/dev/null 2>&1 &
   fi
   if [ -n "$xtool" ]; then
-    _follow_resize "$xtool" "$display" &
+    _follow_resize "$xtool" "$display" "$settle" "$follow" &
   fi
   if [ -x /usr/X11R6/bin/xsetroot ]; then
     /usr/X11R6/bin/xsetroot -display "$display" -cursor_name left_ptr 2>/dev/null
   fi
   exec "$@"
-' _ "$_SANDBOX_HOME" "$_DISPLAY" "$_WM" "$_XDOOL" /usr/bin/env -i \
+' _ "$_SANDBOX_HOME" "$_DISPLAY" "$_WM" "$_XDOOL" "$_FIT" "$_FOLLOW" \
+  "$_SANDBOX_XAUTH" /usr/bin/env -i \
   DISPLAY="$_DISPLAY" \
   HOME="$_SANDBOX_HOME" \
   LOGNAME="$FSUNABA_USER" \
   USER="$FSUNABA_USER" \
+  XAUTHORITY="$_SANDBOX_XAUTH" \
   PATH="/usr/bin:/bin:/usr/X11R6/bin:/usr/local/bin" \
   "$@"
 _status=$?
