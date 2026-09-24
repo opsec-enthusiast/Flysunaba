@@ -97,7 +97,7 @@ permit nopass <username> as fsunaba-amnesic
 $ doas make uninstall USER="$USER"
 ```
 
-The individual `uninstall-user`, `uninstall-amnesic-user`, `uninstall-doas` and `uninstall-sndio-cookie` targets undo one piece each. All of them are safe to run again, and none of them fails when the piece is already gone.
+The individual `uninstall-user`, `uninstall-amnesic-user`, `uninstall-doas` and `uninstall-sndio-cookie` targets undo one piece each. All of them are safe to run again, and none of them fails when the piece is already gone. Removing a sandbox user asks before deleting its home directory, so the directory survives when the question is not answered; `make install` reuses it.
 
 ## USAGE
 
