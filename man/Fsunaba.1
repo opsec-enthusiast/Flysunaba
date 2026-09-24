@@ -1,4 +1,4 @@
-.Dd $Mdocdate: September 18 2026 $
+.Dd $Mdocdate: September 23 2026 $
 .Dt FSUNABA 1
 .Os
 .Sh NAME
@@ -42,10 +42,12 @@ from the host X session.
 .Pp
 IMPORTANT:
 .Nm
-is a proof of concept and in no way guarantees that it will prevent access to
-your data.
-The sandbox does not restrict network, audio, or clipboard access by default,
-and the application runs with the full privileges of the sandbox user.
+reduces the blast radius of an untrusted X application; it is not a strong
+isolation boundary.
+The sandbox does not restrict network access, and the application runs with the
+full privileges of the sandbox user.
+Audio and clipboard access are not shared by default; see
+.Sx SECURITY CONSIDERATIONS .
 .Pp
 The options are as follows:
 .Bl -tag -width Ds
@@ -89,15 +91,19 @@ also resizes the largest application window to fill the new display; see
 .It Fl s Ar width Ns x Ns Ar height
 Set the sandbox display resolution in pixels, for example
 .Ar 1280x1024 .
-Defaults to 1024x768, except for applications with their own default, as
-described in
+Defaults to 1024x768, reduced to the host screen's work area when that is
+smaller, except for applications with their own default, as described in
 .Sx APPLICATION DEFAULTS .
 .It Fl u Ar user
 Run the application as the named sandbox user.
 Defaults to the
 .Cm fsunaba
 user.
-The user must already exist.
+The user must already exist and must not be a member of
+.Cm wheel
+or
+.Cm operator ,
+because such a user could escalate from inside the sandbox.
 .It Fl v
 Show verbose output.
 .It Fl w
@@ -129,22 +135,43 @@ A second invocation started while the first is running therefore uses a
 different display, and neither application can read the other's windows or
 inject events into them.
 .Pp
+Each session keeps its own X authentication cookie in
+.Pa ~/.fsunaba/Xauthority.N ,
+where
+.Ar N
+is the sandbox display number, mode 600, removed when the session ends, and
+exports it to the application as
+.Ev XAUTHORITY
+rather than the sandbox user's shared
+.Pa ~/.Xauthority .
+.Pp
 The application receives a minimal environment consisting only of
 .Ev DISPLAY ,
 .Ev HOME ,
 .Ev LOGNAME ,
 .Ev USER ,
+.Ev XAUTHORITY ,
 and
 .Ev PATH ,
 its arguments are passed through unchanged, and it is started with its home
 directory as the working directory, since the invoking user's working directory
 is usually not readable by the sandbox user.
+The application also runs with a umask of 077, so the files and directories it
+creates are private to the sandbox user by default; an application that needs a
+group-readable file will create a private one instead.
 The root cursor is set to the usual arrow, because a popup window that sets no
 cursor of its own would otherwise inherit the server default, a large X.
 .Sh APPLICATION DEFAULTS
 .Nm
 appends window geometry options for applications it recognizes, so that the
-application window fits the sandbox display:
+application window fits the sandbox display, which is 1024x768, or the host
+screen's work area when that is smaller, unless
+.Fl s
+or the
+.Ev WIDTH
+and
+.Ev HEIGHT
+environment variables say otherwise:
 .Bl -tag -width "ungoogled-chromium" -compact
 .It chrome , chromium , ungoogled-chromium
 The
@@ -159,37 +186,48 @@ and
 .Ic -height
 options.
 .It tor-browser
-The
-.Ic -width
-and
-.Ic -height
-options, and, unless a size was requested with
+A 1000x1000 sandbox display, unless a size was requested with
 .Fl s
 or the
 .Ev WIDTH
 and
 .Ev HEIGHT
-environment variables, a 1000x1000 sandbox display.
-Tor Browser opens a 1000x1000 window by default and letterboxes its content to
-multiples of 200x100 pixels, so this keeps the browser's default window size
-and does not change its fingerprint.
+environment variables, and the
+.Ic -width
+and
+.Ic -height
+options.
+Tor Browser resists fingerprinting by sizing its window from the screen and
+rounding its content to multiples of 200x100 pixels, so the display size
+decides how much room it takes and the geometry options are only a hint.
 .El
 .Pp
 Applications not listed above receive no geometry options.
+When the optional
+.Cm xdotool
+command is installed,
+.Nm
+also resizes the largest browser window to fill the display while it starts;
+see
+.Sx CAVEATS .
 .Pp
 With
 .Fl A ,
 the amnesic user's home directory is emptied before the application starts, so
-each session begins with an empty home, and it is emptied again when the session
-ends.
+each session begins with an empty home apart from its own session authority
+file, and the home is emptied again when the session ends.
 Files left with restrictive permissions are made writable first, and
 .Nm
 reports an error if anything survives the erase.
 .Nm
-refuses to run amnesic mode as root, against the invoking user, against
+runs only as an unprivileged user, and amnesic mode in addition refuses to run
+as the invoking user or with the invoking user's user identifier, as
 .Cm root ,
-or when the amnesic home is not under
-.Pa /home .
+on a home that is a symbolic link, on a home that is not under
+.Pa /home ,
+on a home that is not owned by the amnesic user, or on a home that resolves to
+the invoking user's own home directory.
+Nothing is erased when the guard refuses.
 Data written outside the home directory, such as in
 .Pa /tmp ,
 is not erased.
@@ -212,12 +250,6 @@ Show verbose output if set to
 otherwise suppress it.
 Defaults to
 .Sq false .
-.It Ev FSUNABA_WM
-Window manager to run when the
-.Fl w
-option is given.
-Defaults to
-.Cm cwm .
 .It Ev FSUNABA_WM
 Window manager to run inside the sandbox when the
 .Fl w
@@ -271,6 +303,15 @@ The
 and
 .Fl G
 options append to this value.
+The
+.Fl ac ,
+.Fl auth ,
+.Fl nolock ,
+.Fl listen
+and
+.Cm +iglx
+options are refused before anything runs, because each would weaken the
+sandbox display.
 .El
 .Sh EXIT STATUS
 .Ex -std
@@ -298,6 +339,30 @@ Run Tor Browser at its default window size:
 Run a browser with a window manager in the sandbox, so its popup menus work:
 .Pp
 .Dl $ Fsunaba -w tor-browser
+.Pp
+Give the sandbox access to the invoking user's audio, by copying the
+.Xr sndio 7
+cookie into it:
+.Bd -literal -offset indent
+$ doas -u fsunaba mkdir -p ~fsunaba/.sndio
+$ doas install -o fsunaba -g fsunaba -m 600 ~/.sndio/cookie ~fsunaba/.sndio/
+.Ed
+The microphone is reachable too when kernel audio recording is enabled.
+.Pp
+Copy the sandbox selection or clipboard to the invoking user's, and back,
+replacing
+.Ar user
+and
+.Ar :N
+with the sandbox user and display:
+.Bd -literal -offset indent
+$ doas -u user xclip -display :N -out | xclip -in
+$ xclip -out | doas -u user xclip -display :N -in
+.Ed
+Add
+.Ic -selection clipboard
+to both sides for the clipboard instead of the primary selection.
+Both directions weaken the sandbox.
 .Sh SEE ALSO
 .Xr doas 1 ,
 .Xr ksh 1 ,
@@ -305,6 +370,7 @@ Run a browser with a window manager in the sandbox, so its popup menus work:
 .Xr xauth 1 ,
 .Xr Xephyr 1 ,
 .Xr XEvents 3 ,
+.Xr sndio 7 ,
 .Xr X 7
 .Sh HISTORY
 .Nm
@@ -355,27 +421,32 @@ When the optional
 .Cm xdotool
 command is installed,
 .Nm
-checks the display size once per second and resizes the largest application
-window to fill the new display, with or without a window manager.
-Without it, an application fills the new space only if the window manager
-resizes or re-maximizes its windows when the screen changes.
+resizes the largest application window to the display whenever the display
+changes, and for Firefox-based browsers also while the browser starts, because
+those browsers size their window from the screen and Tor Browser ignores the
+.Ic -width
+and
+.Ic -height
+options under its fingerprinting protection.
+Without
+.Cm xdotool ,
+an application fills the new space only if the window manager resizes its
+windows when the screen changes.
 The default
 .Cm cwm
-updates its own geometry but leaves existing windows alone, and the base window
-managers that react to a screen change,
+updates its own geometry but leaves existing windows alone.
+A window manager that draws a title bar, such as
+.Cm fvwm ,
+can look better with Tor Browser, which always leaves room for window
+decorations; choose one with
+.Ev FSUNABA_WM .
+Firefox-based browsers take a different popup code path under
 .Cm twm
 and
 .Cm fvwm ,
-make Firefox-based browsers use a popup pointer grab that breaks their menus.
-Run a re-tiling window manager through
-.Ev FSUNABA_WM ,
-such as
-.Cm i3 ,
-.Cm awesome ,
-.Cm bspwm
-or
-.Cm xmonad ,
-or start at the size you want with
+which older releases do not get right; if their menus misbehave, keep
+.Cm cwm .
+Start at the size you want with
 .Fl s .
 .Pp
 If another process takes the chosen display number before
@@ -395,8 +466,7 @@ also write to its home directory and
 .Pa /tmp ,
 reach services on
 .Cm localhost ,
-read the sandbox user's
-.Pa ~/.Xauthority ,
+read the authority files of the sandbox user's other sessions,
 exhaust local resources, and reach
 .Xr Xephyr 1
 and the kernel through their own bugs.
@@ -410,15 +480,19 @@ Audio and clipboard access are not shared by default.
 Copying the invoking user's
 .Xr sndio 7
 cookie into the sandbox grants it access to the audio session, including the
-microphone when kernel audio recording is enabled.
+microphone when kernel audio recording is enabled, and the selection and
+clipboard are copied with
+.Cm xclip ;
+see
+.Sx EXAMPLES .
 .Pp
 The sandbox confines the application no further than the sandbox user, the
 sandbox display, and the erased home directory do.
 .Pp
 Separate displays keep concurrent sessions apart in X, but two sessions that
-run as the same sandbox user still share that user's home directory and
-.Pa ~/.Xauthority ,
-so each can reach the other's display.
+run as the same sandbox user still share that user's home directory and user
+identifier, so one can read the other's cookie file and reach the other's
+display.
 Give each concurrent session its own sandbox user with
 .Fl u
 when they must not reach each other.
