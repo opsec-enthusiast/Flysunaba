@@ -42,18 +42,40 @@ install: ${BIN}/${PROG} ${MAN}/${PROG}.${SECTION} install-user install-doas
 		/usr/sbin/makewhatis ${PREFIX}/man; \
 	fi
 
+# create the sandbox user, keeping a home directory that is already there: a
+# previous uninstall removes the user, not the home, and useradd refuses to
+# create a user whose home directory exists
 install-user: check-fsunaba-user
-	id ${FSUNABA_USER} >/dev/null 2>&1 || useradd -m ${FSUNABA_USER}
+	@if id ${FSUNABA_USER} >/dev/null 2>&1; then \
+		echo "make: user '${FSUNABA_USER}' already exists"; \
+	elif [ -d /home/${FSUNABA_USER} ]; then \
+		echo "make: adding '${FSUNABA_USER}' with its existing home"; \
+		useradd -d /home/${FSUNABA_USER} ${FSUNABA_USER} || exit 1; \
+	else \
+		useradd -m -d /home/${FSUNABA_USER} ${FSUNABA_USER} || exit 1; \
+	fi
 	chmod go-w ~${FSUNABA_USER}
+	@if [ "$$(stat -f %Su /home/${FSUNABA_USER})" != "${FSUNABA_USER}" ]; then \
+		echo "make: warning: '/home/${FSUNABA_USER}' is not owned by '${FSUNABA_USER}'" >&2; \
+	fi
 	@if id -Gn ${FSUNABA_USER} | grep -qwE 'wheel|operator'; then \
 		echo "make: warning: '${FSUNABA_USER}' is a member of a privileged group" >&2; \
 	fi
 
 # create the amnesic user whose home is erased around each session
 install-amnesic-user: check-amnesic-user
-	id ${FSUNABA_AMNESIC_USER} >/dev/null 2>&1 \
-		|| useradd -m ${FSUNABA_AMNESIC_USER}
+	@if id ${FSUNABA_AMNESIC_USER} >/dev/null 2>&1; then \
+		echo "make: user '${FSUNABA_AMNESIC_USER}' already exists"; \
+	elif [ -d /home/${FSUNABA_AMNESIC_USER} ]; then \
+		echo "make: adding '${FSUNABA_AMNESIC_USER}' with its existing home"; \
+		useradd -d /home/${FSUNABA_AMNESIC_USER} ${FSUNABA_AMNESIC_USER} || exit 1; \
+	else \
+		useradd -m -d /home/${FSUNABA_AMNESIC_USER} ${FSUNABA_AMNESIC_USER} || exit 1; \
+	fi
 	chmod go-w ~${FSUNABA_AMNESIC_USER}
+	@if [ "$$(stat -f %Su /home/${FSUNABA_AMNESIC_USER})" != "${FSUNABA_AMNESIC_USER}" ]; then \
+		echo "make: warning: '/home/${FSUNABA_AMNESIC_USER}' is not owned by '${FSUNABA_AMNESIC_USER}'" >&2; \
+	fi
 	@if id -Gn ${FSUNABA_AMNESIC_USER} | grep -qwE 'wheel|operator'; then \
 		echo "make: warning: '${FSUNABA_AMNESIC_USER}' is a member of a privileged group" >&2; \
 	fi
